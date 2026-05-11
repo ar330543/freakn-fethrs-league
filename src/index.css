@@ -1,6 +1,36 @@
-body{margin:0;background:#050505;color:#fff;font-family:Arial,sans-serif}*{box-sizing:border-box}
-.container{max-width:1100px;margin:auto;padding:24px}.card{background:#111;border:1px solid #2a2a2a;border-radius:16px;padding:20px;margin-bottom:16px}
-input,button{width:100%;padding:10px;border-radius:10px;border:1px solid #333;background:#0f0f0f;color:#fff}
-button{cursor:pointer;background:linear-gradient(90deg,#ff3b00,#ff8c00);border:none;font-weight:700}
-.row{display:flex;gap:8px;flex-wrap:wrap}.row>*{flex:1}
-table{width:100%;border-collapse:collapse}th,td{padding:8px;border-bottom:1px solid #222;text-align:left}.small{color:#aaa}
+:root{
+  --bg:#050505;--panel:#101010;--panel2:#171717;--line:#2d2d2d;
+  --red:#ff3b00;--orange:#ff8c00;--gold:#fff1b8;--muted:#a5a5a5;--green:#4ade80;
+}
+*{box-sizing:border-box}
+body{margin:0;background:
+radial-gradient(circle at 15% 0%, rgba(255,59,0,.18), transparent 30%),
+radial-gradient(circle at 90% 30%, rgba(255,140,0,.10), transparent 30%),
+#050505;color:white;font-family:Inter,system-ui,sans-serif}
+button,input,textarea,select{font:inherit}
+button{cursor:pointer}
+.app{min-height:100vh;display:grid;grid-template-columns:280px 1fr}
+.sidebar{border-right:1px solid var(--line);padding:24px;background:rgba(0,0,0,.55);position:sticky;top:0;height:100vh}
+.logo{font-family:'Bebas Neue';font-size:42px;line-height:.9;color:var(--gold);text-shadow:0 0 20px rgba(255,59,0,.6)}
+.logo span{color:var(--red)}
+.nav{margin-top:28px;display:grid;gap:8px}
+.nav button{background:transparent;color:#ddd;border:1px solid transparent;text-align:left;padding:13px 14px;border-radius:12px;font-weight:800}
+.nav button.active,.nav button:hover{background:linear-gradient(90deg,rgba(255,59,0,.25),rgba(255,140,0,.05));border-color:rgba(255,59,0,.45)}
+.main{padding:28px;max-width:1280px;width:100%;margin:0 auto}
+.header{display:flex;gap:16px;align-items:center;justify-content:space-between;margin-bottom:22px}
+h1,h2,h3{font-family:'Bebas Neue';letter-spacing:1px;margin:0}
+h1{font-size:54px} h2{font-size:34px;color:var(--gold)}
+.card{background:linear-gradient(180deg,rgba(24,24,24,.96),rgba(9,9,9,.96));border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 0 40px rgba(255,59,0,.08);margin-bottom:16px}
+.grid{display:grid;gap:16px}.stats{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.stat b{display:block;font-size:34px;color:var(--gold);margin-top:4px}.muted{color:var(--muted);font-size:13px}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.row>*{flex:1}
+input,textarea,select{width:100%;padding:11px 12px;border-radius:12px;border:1px solid #333;background:#0b0b0b;color:white}
+textarea{min-height:120px}
+.btn{border:0;border-radius:12px;padding:12px 14px;font-weight:900;color:white;background:linear-gradient(90deg,var(--red),var(--orange))}
+.btn.secondary{background:#202020;border:1px solid #3a3a3a}.btn.danger{background:#991b1b}
+table{width:100%;border-collapse:collapse}th,td{padding:11px 8px;border-bottom:1px solid #242424;text-align:left}th{color:#aaa;font-size:12px;text-transform:uppercase;letter-spacing:1px}
+.badge{display:inline-flex;align-items:center;border:1px solid #333;background:#111;border-radius:999px;padding:5px 9px;font-size:12px;font-weight:800}
+.team{border-left:4px solid var(--red)}.game{display:grid;grid-template-columns:1fr 90px 90px 1fr;gap:8px;align-items:center;padding:10px 0;border-bottom:1px solid #202020}
+.score{max-width:90px;text-align:center;font-size:22px;font-weight:900}
+.diffpos{color:var(--green)}.diffneg{color:#fb7185}
+@media(max-width:850px){.app{display:block}.sidebar{position:relative;height:auto}.main{padding:16px}.game{grid-template-columns:1fr 70px 70px 1fr}h1{font-size:42px}}

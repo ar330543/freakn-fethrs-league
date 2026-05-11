@@ -1,17 +1,11 @@
-# Freakn Fethrs Badminton League
+# Freakn Fethrs League - Full Interactive MVP
 
-## Local Development
-```bash
-npm install
-cp .env.example .env
-npm run dev
-```
+## Deploy update
+1. Replace your GitHub repository contents with these files.
+2. Run `sql/schema.sql` in Supabase SQL Editor.
+3. Commit changes to GitHub.
+4. Vercel will redeploy automatically.
 
-## Deployment
-1. Push this folder to GitHub.
-2. Import the repo into Vercel.
-3. Add environment variables from `.env.example`.
-4. Deploy.
-
-## Supabase
-Run the SQL in `sql/schema.sql`.
+## Environment variables in Vercel
+- VITE_SUPABASE_URL
+- VITE_SUPABASE_ANON_KEY
