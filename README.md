@@ -1,20 +1,18 @@
-# Freakn Fethrs Production V8
+# Freakn Fethrs Production V9 - Overall League Standings
 
-This is a clean, readable rebuild of the current app code.
-
-Fixes:
-- Score input accepts typing normally.
-- Score values are local while typing and saved only on Save.
-- Visible build marker: `Build: V8 Clean Score Input Fix`.
-- Week deletion is protected.
-- Multiple leagues/weeks, auto teams, manual teams, standings, and realtime sync are retained.
-
-Deploy:
-1. Replace all files in GitHub with this ZIP contents at the repo root.
-2. Commit to GitHub.
-3. Vercel auto-deploys.
-4. Confirm the live site shows `Build: V8 Clean Score Input Fix`.
+Adds:
+- Overall standings under each league
+- Calculates all completed scores across all weeks in the selected league
+- Stores the calculated leaderboard as a snapshot
+- Undo previous leaderboard snapshot
+- Clear leaderboard
+- Recalculate anytime
 
 SQL:
-- No SQL rerun needed if the normalized schema already exists.
-- If needed, run `sql/schema.sql`.
+Run `sql/schema.sql` in Supabase. This is non-destructive and only adds overall leaderboard tables.
+
+Deploy:
+1. Replace GitHub files with this ZIP contents.
+2. Run the SQL.
+3. Commit to GitHub.
+4. Confirm live app shows: Build: V9 Overall League Standings

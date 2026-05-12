@@ -148,3 +148,31 @@ do $$ begin alter publication supabase_realtime add table team_players; exceptio
 do $$ begin alter publication supabase_realtime add table matches; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table match_games; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table game_scores; exception when duplicate_object then null; end $$;
+
+
+
+-- V9 non-destructive overall leaderboard feature
+create table if not exists overall_leaderboards (
+  league_id uuid primary key references leagues(id) on delete cascade,
+  data jsonb not null default '[]'::jsonb,
+  calculated_at timestamptz default now()
+);
+
+create table if not exists overall_leaderboard_history (
+  id uuid primary key default gen_random_uuid(),
+  league_id uuid references leagues(id) on delete cascade not null,
+  data jsonb not null default '[]'::jsonb,
+  created_at timestamptz default now()
+);
+
+alter table overall_leaderboards enable row level security;
+alter table overall_leaderboard_history enable row level security;
+
+drop policy if exists "public all overall_leaderboards" on overall_leaderboards;
+create policy "public all overall_leaderboards" on overall_leaderboards for all using (true) with check (true);
+
+drop policy if exists "public all overall_leaderboard_history" on overall_leaderboard_history;
+create policy "public all overall_leaderboard_history" on overall_leaderboard_history for all using (true) with check (true);
+
+do $$ begin alter publication supabase_realtime add table overall_leaderboards; exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table overall_leaderboard_history; exception when duplicate_object then null; end $$;

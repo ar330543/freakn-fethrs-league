@@ -57,12 +57,14 @@ export default function App() {
   const [error, setError] = useState('');
   const [manual, setManual] = useState({ teamCount: 4, assignments: {} });
   const [draft, setDraft] = useState({});
+  const [overallRows, setOverallRows] = useState([]);
+  const [overallCalculatedAt, setOverallCalculatedAt] = useState(null);
 
   const league = leagues.find((l) => l.id === leagueId);
   const week = weeks.find((w) => w.id === weekId);
 
   useEffect(() => { boot(); }, []);
-  useEffect(() => { if (leagueId) loadWeeks(true); }, [leagueId]);
+  useEffect(() => { if (leagueId) { loadWeeks(true); loadOverallLeaderboard(); } }, [leagueId]);
   useEffect(() => { if (weekId) loadWeekData(); else clearWeekData(); }, [weekId]);
 
   useEffect(() => {
@@ -91,6 +93,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'matches' }, () => loadWeekData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'match_games' }, () => loadWeekData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_scores' }, () => loadWeekData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'overall_leaderboards' }, () => loadOverallLeaderboard())
       .subscribe();
 
     return () => supabase.removeChannel(channel);
@@ -494,6 +497,194 @@ export default function App() {
     });
   }
 
+
+  async function loadOverallLeaderboard() {
+    if (!leagueId) {
+      setOverallRows([]);
+      setOverallCalculatedAt(null);
+      return;
+    }
+
+    const { data } = await supabase
+      .from('overall_leaderboards')
+      .select('*')
+      .eq('league_id', leagueId)
+      .maybeSingle();
+
+    setOverallRows(data?.data || []);
+    setOverallCalculatedAt(data?.calculated_at || null);
+  }
+
+  function rankOverall(rows) {
+    return rows
+      .map((x) => ({
+        ...x,
+        pointDiff: (x.pointsFor || 0) - (x.pointsAgainst || 0),
+        winPct: x.played ? Math.round(((x.wins || 0) / x.played) * 100) : 0,
+      }))
+      .sort((a, b) =>
+        (b.wins || 0) - (a.wins || 0) ||
+        (b.pointDiff || 0) - (a.pointDiff || 0) ||
+        (b.pointsFor || 0) - (a.pointsFor || 0) ||
+        a.player.localeCompare(b.player)
+      );
+  }
+
+  async function calculateOverallLeaderboard() {
+    if (!leagueId) return fail('No league is selected.');
+
+    await act(async () => {
+      const { data: leagueWeeks, error: wErr } = await supabase
+        .from('weeks')
+        .select('id,name')
+        .eq('league_id', leagueId);
+      if (wErr) throw wErr;
+
+      const weekIds = (leagueWeeks || []).map((w) => w.id);
+      if (!weekIds.length) return fail('This league has no weeks to calculate.');
+
+      const [pRes, mRes] = await Promise.all([
+        supabase.from('players').select('*').in('week_id', weekIds),
+        supabase.from('matches').select('*').in('week_id', weekIds),
+      ]);
+      if (pRes.error) throw pRes.error;
+      if (mRes.error) throw mRes.error;
+
+      const allPlayers = pRes.data || [];
+      const allMatches = mRes.data || [];
+      const matchIds = allMatches.map((m) => m.id);
+      const playerById = Object.fromEntries(allPlayers.map((p) => [p.id, p]));
+
+      if (!matchIds.length) {
+        await supabase.from('overall_leaderboards').upsert({
+          league_id: leagueId,
+          data: [],
+          calculated_at: new Date().toISOString(),
+        });
+        setOverallRows([]);
+        return;
+      }
+
+      const { data: allGames, error: gErr } = await supabase
+        .from('match_games')
+        .select('*')
+        .in('match_id', matchIds);
+      if (gErr) throw gErr;
+
+      const gameIds = (allGames || []).map((g) => g.id);
+      const { data: allScores, error: sErr } = gameIds.length
+        ? await supabase.from('game_scores').select('*').in('game_id', gameIds)
+        : { data: [], error: null };
+      if (sErr) throw sErr;
+
+      const scoreByGame = Object.fromEntries((allScores || []).map((s) => [s.game_id, s]));
+      const stats = {};
+
+      function ensure(name) {
+        if (!stats[name]) stats[name] = { player: name, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0 };
+        return stats[name];
+      }
+
+      (allGames || []).forEach((game) => {
+        const score = scoreByGame[game.id];
+        if (!score || score.score1 == null || score.score2 == null) return;
+
+        const s1 = Number(score.score1);
+        const s2 = Number(score.score2);
+
+        [game.t1_player1_id, game.t1_player2_id].forEach((id) => {
+          const player = playerById[id];
+          if (!player) return;
+          const row = ensure(player.name);
+          row.played++;
+          row.pointsFor += s1;
+          row.pointsAgainst += s2;
+          if (s1 > s2) row.wins++;
+          else if (s2 > s1) row.losses++;
+        });
+
+        [game.t2_player1_id, game.t2_player2_id].forEach((id) => {
+          const player = playerById[id];
+          if (!player) return;
+          const row = ensure(player.name);
+          row.played++;
+          row.pointsFor += s2;
+          row.pointsAgainst += s1;
+          if (s2 > s1) row.wins++;
+          else if (s1 > s2) row.losses++;
+        });
+      });
+
+      const ranked = rankOverall(Object.values(stats));
+
+      if ((overallRows || []).length) {
+        await supabase.from('overall_leaderboard_history').insert({ league_id: leagueId, data: overallRows });
+      }
+
+      const calculatedAt = new Date().toISOString();
+      const { error: upsertErr } = await supabase.from('overall_leaderboards').upsert({
+        league_id: leagueId,
+        data: ranked,
+        calculated_at: calculatedAt,
+      });
+      if (upsertErr) throw upsertErr;
+
+      setOverallRows(ranked);
+      setOverallCalculatedAt(calculatedAt);
+    });
+  }
+
+  async function clearOverallLeaderboard() {
+    if (!leagueId) return fail('No league is selected.');
+    if (!confirm('Clear the overall leaderboard for this league?')) return;
+
+    await act(async () => {
+      if ((overallRows || []).length) {
+        await supabase.from('overall_leaderboard_history').insert({ league_id: leagueId, data: overallRows });
+      }
+
+      const calculatedAt = new Date().toISOString();
+      const { error: err } = await supabase.from('overall_leaderboards').upsert({
+        league_id: leagueId,
+        data: [],
+        calculated_at: calculatedAt,
+      });
+      if (err) throw err;
+
+      setOverallRows([]);
+      setOverallCalculatedAt(calculatedAt);
+    });
+  }
+
+  async function undoOverallLeaderboard() {
+    if (!leagueId) return fail('No league is selected.');
+
+    await act(async () => {
+      const { data: last, error: hErr } = await supabase
+        .from('overall_leaderboard_history')
+        .select('*')
+        .eq('league_id', leagueId)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (hErr) throw hErr;
+      if (!last) return fail('There is no previous overall leaderboard to restore.');
+
+      const calculatedAt = new Date().toISOString();
+      const { error: upsertErr } = await supabase.from('overall_leaderboards').upsert({
+        league_id: leagueId,
+        data: last.data || [],
+        calculated_at: calculatedAt,
+      });
+      if (upsertErr) throw upsertErr;
+
+      await supabase.from('overall_leaderboard_history').delete().eq('id', last.id);
+
+      setOverallRows(last.data || []);
+      setOverallCalculatedAt(calculatedAt);
+    });
+  }
+
   const playerStandings = useMemo(() => {
     const stats = {};
     players.forEach((p) => {
@@ -585,6 +776,7 @@ export default function App() {
     ['matches', 'Matches', Swords],
     ['team', 'Team Standings', Trophy],
     ['playersStand', 'Player Standings', Star],
+    ['overall', 'Overall Standings', Flame],
     ['settings', 'Settings', Settings],
   ];
 
@@ -605,7 +797,7 @@ export default function App() {
 
         <div className="card">
           <b>{saving ? 'SAVING' : 'LIVE SYNC'}</b>
-          <p className="buildMarker">Build: V8 Clean Score Input Fix</p>
+          <p className="buildMarker">Build: V9 Overall League Standings</p>
           <p className="muted">Score typing is local until Save is clicked.</p>
           <button className="btn secondary" onClick={undo}><RotateCcw size={16} /> Undo Last Score</button>
         </div>
@@ -772,6 +964,26 @@ export default function App() {
 
         {tab === 'team' && <Standings rows={teamStandings} type="team" />}
         {tab === 'playersStand' && <Standings rows={playerStandings} type="player" />}
+
+
+        {tab === 'overall' && (
+          <div className="card">
+            <h2>Overall League Standings</h2>
+            <div className="fireline" />
+            <p className="muted">
+              Calculates all completed games across every week in {league?.name || 'this league'}.
+              {overallCalculatedAt ? ` Last calculated: ${new Date(overallCalculatedAt).toLocaleString()}` : ' Not calculated yet.'}
+            </p>
+
+            <div className="row" style={{ marginBottom: 16 }}>
+              <button className="btn" onClick={calculateOverallLeaderboard}>Calculate Leaderboard</button>
+              <button className="btn secondary" onClick={undoOverallLeaderboard}>Undo Overall Leaderboard</button>
+              <button className="btn danger" onClick={clearOverallLeaderboard}>Clear Leaderboard</button>
+            </div>
+
+            <Standings rows={overallRows} type="player" />
+          </div>
+        )}
 
         {tab === 'settings' && (
           <div className="card">
