@@ -1,7 +1,7 @@
 {
-  "name": "freakn-fethrs-production-v6",
+  "name": "freakn-fethrs-production-v7",
   "private": true,
-  "version": "6.0.0",
+  "version": "7.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
