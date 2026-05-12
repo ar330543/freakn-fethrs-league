@@ -1,11 +1,20 @@
-# Freakn Fethrs Production V7
+# Freakn Fethrs Production V8
 
-This version adds a visible build marker: `Build: V7 Score Input Fix`.
+This is a clean, readable rebuild of the current app code.
 
-Use this to confirm Vercel is serving the latest deployment.
+Fixes:
+- Score input accepts typing normally.
+- Score values are local while typing and saved only on Save.
+- Visible build marker: `Build: V8 Clean Score Input Fix`.
+- Week deletion is protected.
+- Multiple leagues/weeks, auto teams, manual teams, standings, and realtime sync are retained.
 
 Deploy:
-1. Replace GitHub files with this ZIP.
-2. Commit changes.
-3. Wait for Vercel deployment to show Ready/Production.
-4. Open the site and confirm you see `Build: V7 Score Input Fix`.
+1. Replace all files in GitHub with this ZIP contents at the repo root.
+2. Commit to GitHub.
+3. Vercel auto-deploys.
+4. Confirm the live site shows `Build: V8 Clean Score Input Fix`.
+
+SQL:
+- No SQL rerun needed if the normalized schema already exists.
+- If needed, run `sql/schema.sql`.
