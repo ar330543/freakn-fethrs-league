@@ -1,16 +1,14 @@
-# Freakn Fethrs Production V1
+# Freakn Fethrs Production V2
 
-Fixes included:
-- Normalized Supabase tables instead of one JSON blob
-- Score-level updates so multiple friends do not overwrite each other
-- Realtime enabled for all main tables
-- Accurate Played/Wins/Losses/PF/PA/Diff standings
-- Multiple leagues and weeks
-- Undo last score update
+Adds:
+- Auto team generation
+- Manual/handpicked team assignment
+- Validation errors for unrealistic asks
+- Score validation
+- Same normalized Supabase schema as Production V1
 
 Deploy:
 1. Replace GitHub files with this ZIP.
-2. Run `sql/schema.sql` in Supabase SQL Editor.
-   Warning: this resets the old app tables.
-3. Commit to GitHub.
-4. Vercel will auto-deploy.
+2. If you already ran Production V1 schema, you do not need to run SQL again.
+3. If not, run `sql/schema.sql`.
+4. Commit to GitHub and Vercel will deploy.

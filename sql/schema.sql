@@ -21,7 +21,6 @@ create table game_scores (game_id uuid primary key references match_games(id) on
 create table score_history (id uuid primary key default gen_random_uuid(), game_id uuid not null, old_score1 int, old_score2 int, new_score1 int, new_score2 int, created_at timestamptz default now());
 
 alter table leagues enable row level security; alter table weeks enable row level security; alter table players enable row level security; alter table teams enable row level security; alter table team_players enable row level security; alter table matches enable row level security; alter table match_games enable row level security; alter table game_scores enable row level security; alter table score_history enable row level security;
-
 create policy "public all leagues" on leagues for all using (true) with check (true);
 create policy "public all weeks" on weeks for all using (true) with check (true);
 create policy "public all players" on players for all using (true) with check (true);
@@ -32,29 +31,22 @@ create policy "public all match_games" on match_games for all using (true) with 
 create policy "public all game_scores" on game_scores for all using (true) with check (true);
 create policy "public all score_history" on score_history for all using (true) with check (true);
 
-create or replace function update_score_with_history(p_game_id uuid, p_score1 int, p_score2 int)
-returns void as $$
+create or replace function update_score_with_history(p_game_id uuid, p_score1 int, p_score2 int) returns void as $$
 declare oldrow game_scores%rowtype;
 begin
   select * into oldrow from game_scores where game_id=p_game_id;
-  insert into score_history(game_id,old_score1,old_score2,new_score1,new_score2)
-  values(p_game_id,oldrow.score1,oldrow.score2,p_score1,p_score2);
-  insert into game_scores(game_id,score1,score2,updated_at) values(p_game_id,p_score1,p_score2,now())
-  on conflict(game_id) do update set score1=excluded.score1, score2=excluded.score2, updated_at=now();
-end;
-$$ language plpgsql security definer;
+  insert into score_history(game_id,old_score1,old_score2,new_score1,new_score2) values(p_game_id,oldrow.score1,oldrow.score2,p_score1,p_score2);
+  insert into game_scores(game_id,score1,score2,updated_at) values(p_game_id,p_score1,p_score2,now()) on conflict(game_id) do update set score1=excluded.score1, score2=excluded.score2, updated_at=now();
+end; $$ language plpgsql security definer;
 
-create or replace function undo_last_score()
-returns void as $$
+create or replace function undo_last_score() returns void as $$
 declare h score_history%rowtype;
 begin
   select * into h from score_history order by created_at desc limit 1;
   if h.id is null then return; end if;
-  insert into game_scores(game_id,score1,score2,updated_at) values(h.game_id,h.old_score1,h.old_score2,now())
-  on conflict(game_id) do update set score1=h.old_score1, score2=h.old_score2, updated_at=now();
+  insert into game_scores(game_id,score1,score2,updated_at) values(h.game_id,h.old_score1,h.old_score2,now()) on conflict(game_id) do update set score1=h.old_score1, score2=h.old_score2, updated_at=now();
   delete from score_history where id=h.id;
-end;
-$$ language plpgsql security definer;
+end; $$ language plpgsql security definer;
 
 do $$ begin alter publication supabase_realtime add table leagues; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table weeks; exception when duplicate_object then null; end $$;
