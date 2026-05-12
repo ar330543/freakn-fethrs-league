@@ -1,206 +1,78 @@
 import { useEffect, useMemo, useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
+import { Home, Users, Shield, Swords, Trophy, Star, Settings, Flame, Plus, Trash2, RotateCcw, Download } from 'lucide-react';
 
-const supabase = (import.meta.env.VITE_SUPABASE_URL && import.meta.env.VITE_SUPABASE_ANON_KEY)
-  ? createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY)
-  : null;
-
-const uid = () => Math.random().toString(36).slice(2, 10);
-const colors = [
-  ['Red','🔴','#ef4444'], ['Blue','🔵','#38bdf8'], ['Green','🟢','#22c55e'], ['Yellow','🟡','#facc15'],
-  ['Orange','🟠','#fb923c'], ['Purple','🟣','#a78bfa']
-];
-
-const defaultState = {
-  currentWeekId: 'week-1',
-  weeks: [{
-    id: 'week-1',
-    name: 'Week 1',
-    players: ['Arjun','Praveen','Nattu','Chandru','Shashank','Anto','Ron','Senthil'],
-    teams: [],
-    matches: [],
-    scores: {}
-  }]
-};
-
-function getWeek(state){ return state.weeks.find(w => w.id === state.currentWeekId) || state.weeks[0]; }
-function getTeam(week, id){ return week.teams.find(t => t.id === id); }
-
-function pairsForTeam(players){
-  if(players.length < 2) return [];
-  const pairs = [];
-  for(let i=0;i<players.length;i++) for(let j=i+1;j<players.length;j++) pairs.push([players[i], players[j]]);
-  return pairs.length ? pairs : [players.slice(0,2)];
-}
-
-function generateRoundRobinMatches(teams){
-  const matches = [];
-  let slot = 1, courtIndex = 0;
-  for(let i=0;i<teams.length;i++){
-    for(let j=i+1;j<teams.length;j++){
-      const t1 = teams[i], t2 = teams[j];
-      const p1 = pairsForTeam(t1.players), p2 = pairsForTeam(t2.players);
-      matches.push({
-        id: uid(), slot, court: courtIndex % 2 === 0 ? 'A' : 'B',
-        team1Id: t1.id, team2Id: t2.id,
-        games: [0,1,2].map(n => ({ t1: p1[n % p1.length], t2: p2[n % p2.length] }))
-      });
-      courtIndex++;
-      if(courtIndex % 2 === 0) slot++;
-    }
-  }
-  return matches;
-}
-
-function computePlayerStandings(week){
-  const stats = {};
-  week.players.forEach(p => stats[p] = { player:p, played:0, wins:0, losses:0, pointsFor:0, pointsAgainst:0, pointDiff:0 });
-  week.matches.forEach(m => {
-    const ms = week.scores[m.id] || {};
-    m.games.forEach((g, idx) => {
-      const s = ms[idx] || {};
-      const a = Number(s.s1), b = Number(s.s2);
-      if(Number.isFinite(a) && Number.isFinite(b) && (s.s1 !== '' && s.s2 !== '')){
-        g.t1.forEach(p => { if(stats[p]){ stats[p].played++; stats[p].pointsFor += a; stats[p].pointsAgainst += b; if(a>b) stats[p].wins++; else if(b>a) stats[p].losses++; }});
-        g.t2.forEach(p => { if(stats[p]){ stats[p].played++; stats[p].pointsFor += b; stats[p].pointsAgainst += a; if(b>a) stats[p].wins++; else if(a>b) stats[p].losses++; }});
-      }
-    });
-  });
-  return Object.values(stats).map(s => ({...s, pointDiff:s.pointsFor-s.pointsAgainst, winPct:s.played?Math.round((s.wins/s.played)*100):0}))
-    .sort((a,b)=> b.wins-a.wins || b.pointDiff-a.pointDiff || b.pointsFor-a.pointsFor || a.player.localeCompare(b.player));
-}
-
-function computeTeamStandings(week){
-  const st = {};
-  week.teams.forEach(t => st[t.id] = { team:t, played:0, matchWins:0, losses:0, draws:0, gameWins:0, pointsFor:0, pointsAgainst:0 });
-  week.matches.forEach(m => {
-    const aTeam = st[m.team1Id], bTeam = st[m.team2Id];
-    if(!aTeam || !bTeam) return;
-    let aw=0,bw=0,ap=0,bp=0,done=0;
-    const ms = week.scores[m.id] || {};
-    m.games.forEach((_, idx) => {
-      const s=ms[idx]||{}; const a=Number(s.s1), b=Number(s.s2);
-      if(Number.isFinite(a)&&Number.isFinite(b)&&(s.s1!==''&&s.s2!=='')){ done++; ap+=a; bp+=b; if(a>b)aw++; else if(b>a)bw++; }
-    });
-    aTeam.gameWins+=aw; bTeam.gameWins+=bw; aTeam.pointsFor+=ap; aTeam.pointsAgainst+=bp; bTeam.pointsFor+=bp; bTeam.pointsAgainst+=ap;
-    if(done){ aTeam.played++; bTeam.played++; if(aw>bw){aTeam.matchWins++; bTeam.losses++;} else if(bw>aw){bTeam.matchWins++; aTeam.losses++;} else {aTeam.draws++; bTeam.draws++;}}
-  });
-  return Object.values(st).map(s=>({...s, pointDiff:s.pointsFor-s.pointsAgainst}))
-    .sort((a,b)=> b.matchWins-a.matchWins || b.pointDiff-a.pointDiff || b.pointsFor-a.pointsFor);
-}
+const supabase = createClient(import.meta.env.VITE_SUPABASE_URL, import.meta.env.VITE_SUPABASE_ANON_KEY);
+const teamColors=[['Red','🔴','#ef4444'],['Blue','🔵','#38bdf8'],['Green','🟢','#22c55e'],['Yellow','🟡','#facc15'],['Orange','🟠','#fb923c'],['Purple','🟣','#a78bfa']];
+function combo(players){const out=[];for(let i=0;i<players.length;i++)for(let j=i+1;j<players.length;j++)out.push([players[i],players[j]]);return out.length?out:[players.slice(0,2)]}
 
 export default function App(){
-  const [state,setState] = useState(defaultState);
-  const [tab,setTab] = useState('dashboard');
-  const [playerText,setPlayerText] = useState('');
-  const [saving,setSaving] = useState(false);
-  const [connected,setConnected] = useState(Boolean(supabase));
-  const slug = 'freakn-fethrs-main';
-  const week = getWeek(state);
+ const [tab,setTab]=useState('dashboard'),[leagues,setLeagues]=useState([]),[weeks,setWeeks]=useState([]),[players,setPlayers]=useState([]),[teams,setTeams]=useState([]),[teamPlayers,setTeamPlayers]=useState([]),[matches,setMatches]=useState([]),[games,setGames]=useState([]),[scores,setScores]=useState([]);
+ const [leagueId,setLeagueId]=useState(''),[weekId,setWeekId]=useState(''),[names,setNames]=useState(''),[saving,setSaving]=useState(false);
+ const league=leagues.find(l=>l.id===leagueId), week=weeks.find(w=>w.id===weekId);
 
-  useEffect(() => {
-    async function init(){
-      if(!supabase){ setConnected(false); return; }
-      const { data: row, error } = await supabase.from('league_state').select('*').eq('slug', slug).maybeSingle();
-      if(row?.data) setState(row.data);
-      else await supabase.from('league_state').insert({ slug, data: defaultState });
-      if(error) console.error(error);
-      const ch = supabase.channel('league-live')
-        .on('postgres_changes', {event:'*', schema:'public', table:'league_state'}, payload => {
-          if(payload.new?.slug === slug && payload.new.data) setState(payload.new.data);
-        }).subscribe();
-      return () => supabase.removeChannel(ch);
-    }
-    init();
-  }, []);
+ useEffect(()=>{boot()},[]);
+ useEffect(()=>{if(leagueId) loadWeeks(true)},[leagueId]);
+ useEffect(()=>{if(weekId) loadWeekData()},[weekId]);
+ useEffect(()=>{const ch=supabase.channel('ff-realtime')
+  .on('postgres_changes',{event:'*',schema:'public',table:'leagues'},()=>loadLeagues(false))
+  .on('postgres_changes',{event:'*',schema:'public',table:'weeks'},()=>loadWeeks(false))
+  .on('postgres_changes',{event:'*',schema:'public',table:'players'},()=>loadWeekData())
+  .on('postgres_changes',{event:'*',schema:'public',table:'teams'},()=>loadWeekData())
+  .on('postgres_changes',{event:'*',schema:'public',table:'team_players'},()=>loadWeekData())
+  .on('postgres_changes',{event:'*',schema:'public',table:'matches'},()=>loadWeekData())
+  .on('postgres_changes',{event:'*',schema:'public',table:'match_games'},()=>loadWeekData())
+  .on('postgres_changes',{event:'*',schema:'public',table:'game_scores'},()=>loadWeekData())
+  .subscribe();return()=>supabase.removeChannel(ch)},[leagueId,weekId]);
 
-  async function save(next){
-    setState(next); setSaving(true);
-    if(supabase){
-      const { error } = await supabase.from('league_state').upsert({ slug, data: next }, { onConflict:'slug' });
-      if(error) alert('Save failed: ' + error.message);
-    }
-    setTimeout(()=>setSaving(false),700);
-  }
-  function updateWeek(patch){
-    save({...state, weeks: state.weeks.map(w => w.id===week.id ? {...w,...patch} : w)});
-  }
-  function addPlayers(){
-    const names = playerText.split('\n').map(x=>x.trim()).filter(Boolean);
-    const merged = Array.from(new Set([...week.players, ...names]));
-    updateWeek({ players: merged, teams: [], matches: [], scores: {} });
-    setPlayerText('');
-  }
-  function removePlayer(p){
-    if(!confirm(`Remove ${p}? Teams and matches will reset.`)) return;
-    updateWeek({ players: week.players.filter(x=>x!==p), teams: [], matches: [], scores: {} });
-  }
-  function randomTeams(){
-    const count = Number(prompt('Number of teams?', Math.max(2, Math.ceil(week.players.length/3))) || 4);
-    const shuffled=[...week.players].sort(()=>Math.random()-.5);
-    const teams=Array.from({length:count},(_,i)=>({id:uid(), name:colors[i%colors.length][0], emoji:colors[i%colors.length][1], color:colors[i%colors.length][2], players:[]}));
-    shuffled.forEach((p,i)=>teams[i%count].players.push(p));
-    updateWeek({ teams, matches: generateRoundRobinMatches(teams), scores: {} });
-  }
-  function renameTeam(id,name){ updateWeek({teams:week.teams.map(t=>t.id===id?{...t,name}:t), matches:week.matches}); }
-  function setScore(matchId, gameIndex, side, value){
-    updateWeek({ scores: {...week.scores, [matchId]: {...(week.scores[matchId]||{}), [gameIndex]: {...((week.scores[matchId]||{})[gameIndex]||{}), [side]: value}}}});
-  }
-  function newWeek(){
-    const name = prompt('New week name?', `Week ${state.weeks.length+1}`);
-    if(!name) return;
-    const nw = { id:uid(), name, players:[...week.players], teams:[], matches:[], scores:{} };
-    save({...state, currentWeekId:nw.id, weeks:[...state.weeks, nw]});
-  }
-  function resetWeek(){
-    if(confirm('Reset teams, matches, and scores for this week?')) updateWeek({teams:[],matches:[],scores:{}});
-  }
-  const playerStandings = useMemo(()=>computePlayerStandings(week),[week]);
-  const teamStandings = useMemo(()=>computeTeamStandings(week),[week]);
-  const completedGames = week.matches.reduce((a,m)=>a+m.games.filter((_,i)=>{const s=(week.scores[m.id]||{})[i]||{}; return s.s1!==undefined&&s.s1!==''&&s.s2!==undefined&&s.s2!==''}).length,0);
-  const totalGames = week.matches.reduce((a,m)=>a+m.games.length,0);
-
-  const nav = [['dashboard','Dashboard'],['players','Players'],['teams','Teams'],['matches','Matches'],['teamStandings','Team Standings'],['playerStandings','Player Standings'],['settings','Weeks / Settings']];
-
-  return <div className="app">
-    <aside className="sidebar">
-      <div className="logo">FREAKN<br/><span>FETHRS</span></div>
-      <div className="muted" style={{marginTop:8}}>Badminton League</div>
-      <div className="nav">{nav.map(([k,l])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}>{l}</button>)}</div>
-      <div className="card" style={{marginTop:24}}><b>{connected?'LIVE SYNC ON':'NO SUPABASE'}</b><div className="muted">{saving?'Saving...':'Ready'}</div></div>
-    </aside>
-
-    <main className="main">
-      <div className="header">
-        <div><h1>{tab.replace(/([A-Z])/g,' $1')}</h1><div className="muted">Current week: {week.name}</div></div>
-        <div className="row" style={{maxWidth:420}}>
-          <select value={week.id} onChange={e=>save({...state,currentWeekId:e.target.value})}>{state.weeks.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select>
-          <button className="btn" onClick={newWeek}>New Week</button>
-        </div>
-      </div>
-
-      {tab==='dashboard' && <>
-        <div className="grid stats">
-          <div className="card stat"><span className="muted">Players</span><b>{week.players.length}</b></div>
-          <div className="card stat"><span className="muted">Teams</span><b>{week.teams.length}</b></div>
-          <div className="card stat"><span className="muted">Matches</span><b>{week.matches.length}</b></div>
-          <div className="card stat"><span className="muted">Games Complete</span><b>{completedGames}/{totalGames}</b></div>
-          <div className="card stat"><span className="muted">Leader</span><b>{playerStandings[0]?.player || '-'}</b></div>
-        </div>
-        <div className="card"><h2>Quick Actions</h2><div className="row"><button className="btn" onClick={()=>setTab('players')}>Manage Players</button><button className="btn" onClick={randomTeams}>Random Teams</button><button className="btn" onClick={()=>setTab('matches')}>Enter Scores</button></div></div>
-      </>}
-
-      {tab==='players' && <div className="card"><h2>Players</h2><textarea value={playerText} onChange={e=>setPlayerText(e.target.value)} placeholder="Paste player names, one per line"></textarea><div className="row" style={{marginTop:10}}><button className="btn" onClick={addPlayers}>Add / Import Players</button></div><table><tbody>{week.players.map(p=><tr key={p}><td>{p}</td><td style={{width:120}}><button className="btn danger" onClick={()=>removePlayer(p)}>Remove</button></td></tr>)}</tbody></table></div>}
-
-      {tab==='teams' && <div className="card"><h2>Teams</h2><button className="btn" onClick={randomTeams}>Generate Random Teams + Schedule</button>{week.teams.map(t=><div className="card team" key={t.id} style={{borderLeftColor:t.color}}><div className="row"><input value={t.name} onChange={e=>renameTeam(t.id,e.target.value)} /><div className="badge">{t.emoji} {t.players.length} players</div></div><p>{t.players.join(', ')}</p></div>)}</div>}
-
-      {tab==='matches' && <div className="card"><h2>Matches & Scores</h2>{week.matches.length===0?<p className="muted">Generate teams first.</p>:week.matches.map(m=>{const t1=getTeam(week,m.team1Id), t2=getTeam(week,m.team2Id); return <div className="card" key={m.id}><h3>Slot {m.slot} · Court {m.court} · {t1?.name} vs {t2?.name}</h3>{m.games.map((g,i)=>{const s=(week.scores[m.id]||{})[i]||{};return <div className="game" key={i}><div>{g.t1.join(' / ')}</div><input className="score" type="number" value={s.s1??''} onChange={e=>setScore(m.id,i,'s1',e.target.value)} /><input className="score" type="number" value={s.s2??''} onChange={e=>setScore(m.id,i,'s2',e.target.value)} /><div>{g.t2.join(' / ')}</div></div>})}</div>})}</div>}
-
-      {tab==='teamStandings' && <div className="card"><h2>Team Standings</h2><table><thead><tr><th>Rank</th><th>Team</th><th>MW</th><th>GW</th><th>PF</th><th>PA</th><th>Diff</th></tr></thead><tbody>{teamStandings.map((s,i)=><tr key={s.team.id}><td>{i+1}</td><td>{s.team.emoji} {s.team.name}</td><td>{s.matchWins}</td><td>{s.gameWins}</td><td>{s.pointsFor}</td><td>{s.pointsAgainst}</td><td className={s.pointDiff>=0?'diffpos':'diffneg'}>{s.pointDiff>0?'+':''}{s.pointDiff}</td></tr>)}</tbody></table></div>}
-
-      {tab==='playerStandings' && <div className="card"><h2>Player Standings</h2><table><thead><tr><th>Rank</th><th>Player</th><th>Wins</th><th>Losses</th><th>PF</th><th>PA</th><th>Diff</th><th>Win %</th></tr></thead><tbody>{playerStandings.map((s,i)=><tr key={s.player}><td>{i===0?'🥇':i===1?'🥈':i===2?'🥉':i+1}</td><td>{s.player}</td><td>{s.wins}</td><td>{s.losses}</td><td>{s.pointsFor}</td><td>{s.pointsAgainst}</td><td className={s.pointDiff>=0?'diffpos':'diffneg'}>{s.pointDiff>0?'+':''}{s.pointDiff}</td><td>{s.winPct}%</td></tr>)}</tbody></table></div>}
-
-      {tab==='settings' && <div className="card"><h2>Weeks / Settings</h2><div className="row"><input value={week.name} onChange={e=>updateWeek({name:e.target.value})}/><button className="btn" onClick={newWeek}>Create New Week</button><button className="btn danger" onClick={resetWeek}>Reset Current Week</button></div><p className="muted">All data is stored in Supabase and synced live to everyone using the public link.</p></div>}
-    </main>
-  </div>
+ async function boot(){await loadLeagues(true)}
+ async function loadLeagues(selectFirst=true){const {data}=await supabase.from('leagues').select('*').order('created_at'); if(!data?.length){const {data:n}=await supabase.from('leagues').insert({name:"Men's League"}).select().single(); const {data:w}=await supabase.from('weeks').insert({league_id:n.id,name:'Week 1'}).select().single(); setLeagues([n]); setLeagueId(n.id); setWeekId(w.id); return;} setLeagues(data); if(selectFirst&&!leagueId)setLeagueId(data[0].id)}
+ async function loadWeeks(selectFirst=true){const {data}=await supabase.from('weeks').select('*').eq('league_id',leagueId).order('created_at'); setWeeks(data||[]); if(selectFirst && data?.length && !data.find(w=>w.id===weekId))setWeekId(data[0].id)}
+ async function loadWeekData(){if(!weekId)return; const [p,t,tp,m,g,s]=await Promise.all([
+  supabase.from('players').select('*').eq('week_id',weekId).order('created_at'),
+  supabase.from('teams').select('*').eq('week_id',weekId).order('created_at'),
+  supabase.from('team_players').select('*'),
+  supabase.from('matches').select('*').eq('week_id',weekId).order('slot').order('court'),
+  supabase.from('match_games').select('*'),
+  supabase.from('game_scores').select('*')
+ ]); setPlayers(p.data||[]); setTeams(t.data||[]); setTeamPlayers(tp.data||[]); setMatches(m.data||[]); setGames(g.data||[]); setScores(s.data||[])}
+ async function act(fn){setSaving(true); try{await fn(); await loadWeekData();}finally{setSaving(false)}}
+ function tpForTeam(id){return teamPlayers.filter(x=>x.team_id===id).map(x=>players.find(p=>p.id===x.player_id)).filter(Boolean)}
+ function team(id){return teams.find(t=>t.id===id)}
+ function scoreFor(gid){return scores.find(s=>s.game_id===gid)||{}}
+ async function addPlayers(){const arr=names.split('\n').map(x=>x.trim()).filter(Boolean); if(!arr.length)return; await act(async()=>{await supabase.from('players').upsert(arr.map(name=>({week_id:weekId,name})),{onConflict:'week_id,name'}); setNames('')})}
+ async function removePlayer(p){if(!confirm('Remove player? This may remove related team/game rows.'))return; await act(async()=>supabase.from('players').delete().eq('id',p.id))}
+ async function newLeague(){const name=prompt('League name?');if(!name)return; await act(async()=>{const {data:l}=await supabase.from('leagues').insert({name}).select().single(); const {data:w}=await supabase.from('weeks').insert({league_id:l.id,name:'Week 1'}).select().single(); setLeagueId(l.id); setWeekId(w.id)})}
+ async function newWeek(){const name=prompt('Week name?',`Week ${weeks.length+1}`);if(!name)return; await act(async()=>{const {data:w}=await supabase.from('weeks').insert({league_id:leagueId,name}).select().single(); setWeekId(w.id)})}
+ async function deleteWeek(){if(!confirm('Delete week?'))return; await act(async()=>{await supabase.from('weeks').delete().eq('id',weekId); setWeekId('')})}
+ async function deleteLeague(){if(!confirm('Delete entire league?'))return; await act(async()=>{await supabase.from('leagues').delete().eq('id',leagueId); setLeagueId(''); setWeekId('')})}
+ async function randomTeams(){const count=Number(prompt('Number of teams?',Math.max(2,Math.ceil(players.length/3)))||4); if(players.length<4)return alert('Add at least 4 players.'); await act(async()=>{
+   await supabase.from('teams').delete().eq('week_id',weekId);
+   const shuffled=[...players].sort(()=>Math.random()-.5);
+   const newTeams=Array.from({length:count},(_,i)=>({week_id:weekId,name:teamColors[i%teamColors.length][0],emoji:teamColors[i%teamColors.length][1],color:teamColors[i%teamColors.length][2]}));
+   const {data:inserted}=await supabase.from('teams').insert(newTeams).select();
+   const links=[]; shuffled.forEach((p,i)=>links.push({team_id:inserted[i%count].id,player_id:p.id})); await supabase.from('team_players').insert(links);
+   const matchRows=[]; let slot=1,c=0; for(let i=0;i<inserted.length;i++)for(let j=i+1;j<inserted.length;j++){matchRows.push({week_id:weekId,slot,court:c%2?'B':'A',team1_id:inserted[i].id,team2_id:inserted[j].id}); c++; if(c%2===0)slot++}
+   const {data:ms}=await supabase.from('matches').insert(matchRows).select();
+   const teamMap=Object.fromEntries(inserted.map(t=>[t.id, links.filter(l=>l.team_id===t.id).map(l=>players.find(p=>p.id===l.player_id))]));
+   const gameRows=[]; ms.forEach(m=>{const a=combo(teamMap[m.team1_id]),b=combo(teamMap[m.team2_id]); [0,1,2].forEach(n=>gameRows.push({match_id:m.id,game_number:n+1,t1_player1_id:a[n%a.length][0].id,t1_player2_id:a[n%a.length][1].id,t2_player1_id:b[n%b.length][0].id,t2_player2_id:b[n%b.length][1].id}))});
+   await supabase.from('match_games').insert(gameRows);
+ })}
+ async function setScore(gameId, s1, s2){await supabase.rpc('update_score_with_history',{p_game_id:gameId,p_score1:s1===''?null:Number(s1),p_score2:s2===''?null:Number(s2)})}
+ async function undo(){await act(async()=>supabase.rpc('undo_last_score'))}
+ const pName=id=>players.find(p=>p.id===id)?.name||'-';
+ const pStats=useMemo(()=>{const st={};players.forEach(p=>st[p.id]={id:p.id,player:p.name,played:0,wins:0,losses:0,pointsFor:0,pointsAgainst:0});games.forEach(g=>{const sc=scoreFor(g.id); if(sc.score1==null||sc.score2==null)return; const a=Number(sc.score1),b=Number(sc.score2); [g.t1_player1_id,g.t1_player2_id].forEach(id=>{if(st[id]){st[id].played++;st[id].pointsFor+=a;st[id].pointsAgainst+=b;if(a>b)st[id].wins++;else if(b>a)st[id].losses++}}); [g.t2_player1_id,g.t2_player2_id].forEach(id=>{if(st[id]){st[id].played++;st[id].pointsFor+=b;st[id].pointsAgainst+=a;if(b>a)st[id].wins++;else if(a>b)st[id].losses++}})}); return Object.values(st).map(x=>({...x,pointDiff:x.pointsFor-x.pointsAgainst,winPct:x.played?Math.round(x.wins/x.played*100):0})).sort((a,b)=>b.wins-a.wins||b.pointDiff-a.pointDiff||b.pointsFor-a.pointsFor||a.player.localeCompare(b.player))},[players,games,scores]);
+ const tStats=useMemo(()=>{const st={};teams.forEach(t=>st[t.id]={team:t,played:0,matchWins:0,losses:0,draws:0,gameWins:0,pointsFor:0,pointsAgainst:0});matches.forEach(m=>{let aw=0,bw=0,ap=0,bp=0,done=0;games.filter(g=>g.match_id===m.id).forEach(g=>{const sc=scoreFor(g.id);if(sc.score1==null||sc.score2==null)return;done++;const a=Number(sc.score1),b=Number(sc.score2);ap+=a;bp+=b;if(a>b)aw++;else if(b>a)bw++});const A=st[m.team1_id],B=st[m.team2_id]; if(!A||!B)return; A.gameWins+=aw;B.gameWins+=bw;A.pointsFor+=ap;A.pointsAgainst+=bp;B.pointsFor+=bp;B.pointsAgainst+=ap;if(done){A.played++;B.played++;if(aw>bw){A.matchWins++;B.losses++}else if(bw>aw){B.matchWins++;A.losses++}else{A.draws++;B.draws++}}});return Object.values(st).map(x=>({...x,pointDiff:x.pointsFor-x.pointsAgainst})).sort((a,b)=>b.matchWins-a.matchWins||b.pointDiff-a.pointDiff||b.pointsFor-a.pointsFor)},[teams,matches,games,scores]);
+ const completed=scores.filter(s=>s.score1!=null&&s.score2!=null).length;
+ const nav=[['dashboard','Dashboard',Home],['players','Players',Users],['teams','Teams',Shield],['matches','Matches',Swords],['team','Team Standings',Trophy],['playersStand','Player Standings',Star],['settings','Settings',Settings]];
+ return <div className="app"><aside className="sidebar"><div className="logoBox"><div className="logo">FREAKN<br/><span>FETHRS</span><br/><small>LEAGUE</small></div></div><div className="nav">{nav.map(([k,l,I])=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}><I size={20}/>{l}</button>)}</div><div className="card"><b>{saving?'SAVING':'LIVE SYNC'}</b><p className="muted">Per-score rows prevent overwrite conflicts.</p><button className="btn secondary" onClick={undo}><RotateCcw size={16}/> Undo Last Score</button></div></aside>
+ <main className="main"><div className="header"><div><h1>{nav.find(n=>n[0]===tab)?.[1]}</h1><div className="eyebrow">{league?.name||'No League'} · {week?.name||'No Week'}</div></div><div className="row" style={{maxWidth:650}}><select value={leagueId} onChange={e=>{setLeagueId(e.target.value);setWeekId('')}}>{leagues.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</select><select value={weekId} onChange={e=>setWeekId(e.target.value)}>{weeks.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select><button className="btn" onClick={newWeek}><Plus size={16}/> Week</button></div></div>
+ {tab==='dashboard'&&<><div className="grid stats"><div className="card stat"><Users className="statIcon"/><div><span className="muted">Players</span><b>{players.length}</b></div></div><div className="card stat"><Shield className="statIcon"/><div><span className="muted">Teams</span><b>{teams.length}</b></div></div><div className="card stat"><Swords className="statIcon"/><div><span className="muted">Matches</span><b>{matches.length}</b></div></div><div className="card stat"><Trophy className="statIcon"/><div><span className="muted">Games Completed</span><b>{completed}/{games.length}</b></div></div><div className="card stat"><Flame className="statIcon"/><div><span className="muted">Leader</span><b>{pStats[0]?.player||'-'}</b></div></div></div><div className="grid two"><div className="card"><h2>Recent Matches</h2><div className="fireline"/>{matches.slice(0,6).map(m=><div className="matchRow" key={m.id}><span className="pill" style={{background:team(m.team1_id)?.color+'33',color:team(m.team1_id)?.color}}>{team(m.team1_id)?.name}</span><div className="scoreBig">VS</div><span className="pill" style={{background:team(m.team2_id)?.color+'33',color:team(m.team2_id)?.color}}>{team(m.team2_id)?.name}</span><span className="muted">Court {m.court} · Slot {m.slot}</span></div>)}</div><div className="card"><h2>Top Players</h2><div className="fireline"/>{pStats.slice(0,5).map((p,i)=><div className="matchRow" key={p.id} style={{gridTemplateColumns:'55px 1fr 90px 90px'}}><b>{i===0?'🥇':i===1?'🥈':i===2?'🥉':i+1}</b><h3>{p.player}</h3><b style={{color:'var(--red)'}}>{p.wins} WINS</b><b className={p.pointDiff>=0?'diffpos':'diffneg'}>{p.pointDiff>0?'+':''}{p.pointDiff}</b></div>)}</div></div></>}
+ {tab==='players'&&<div className="card"><h2>Players</h2><textarea value={names} onChange={e=>setNames(e.target.value)} placeholder="Paste names, one per line"/><button className="btn" onClick={addPlayers}>Add / Import Players</button><table><tbody>{players.map(p=><tr key={p.id}><td>{p.name}</td><td style={{width:120}}><button className="btn danger" onClick={()=>removePlayer(p)}><Trash2 size={16}/></button></td></tr>)}</tbody></table></div>}
+ {tab==='teams'&&<div className="card"><h2>Teams</h2><button className="btn" onClick={randomTeams}>Generate Random Teams + Schedule</button>{teams.map(t=><div className="card" key={t.id} style={{borderLeft:`5px solid ${t.color}`}}><h3>{t.emoji} {t.name}</h3><p>{tpForTeam(t.id).map(p=>p.name).join(', ')}</p></div>)}</div>}
+ {tab==='matches'&&<div className="card"><h2>Matches & Scores</h2>{matches.map(m=><div className="card" key={m.id}><h3>Slot {m.slot} · Court {m.court} · {team(m.team1_id)?.name} vs {team(m.team2_id)?.name}</h3>{games.filter(g=>g.match_id===m.id).sort((a,b)=>a.game_number-b.game_number).map(g=>{const sc=scoreFor(g.id);return <div className="game" key={g.id}><div>{pName(g.t1_player1_id)} / {pName(g.t1_player2_id)}</div><input className="score" type="number" value={sc.score1??''} onChange={e=>setScore(g.id,e.target.value,sc.score2??'')}/><input className="score" type="number" value={sc.score2??''} onChange={e=>setScore(g.id,sc.score1??'',e.target.value)}/><div>{pName(g.t2_player1_id)} / {pName(g.t2_player2_id)}</div></div>})}</div>)}</div>}
+ {tab==='team'&&<Stand rows={tStats} type="team"/>}{tab==='playersStand'&&<Stand rows={pStats} type="player"/>}
+ {tab==='settings'&&<div className="card"><h2>Settings</h2><div className="row"><button className="btn" onClick={newLeague}>Create League</button><button className="btn danger" onClick={deleteLeague}>Delete League</button><button className="btn" onClick={newWeek}>Create Week</button><button className="btn danger" onClick={deleteWeek}>Delete Week</button></div><div className="row"><button className="btn secondary" onClick={undo}>Undo Last Score</button><button className="btn secondary" onClick={()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify({leagues,weeks,players,teams,teamPlayers,matches,games,scores},null,2)],{type:'application/json'}));a.download='freakn-fethrs-export.json';a.click()}}><Download size={16}/> Export Snapshot</button></div></div>}
+ </main></div>
 }
+function Stand({rows,type}){return <div className="card"><h2>Standings</h2><div className="fireline"/>{type==='team'?<table><thead><tr><th>Rank</th><th>Team</th><th>MW</th><th>GW</th><th>PF</th><th>PA</th><th>Diff</th></tr></thead><tbody>{rows.map((s,i)=><tr key={s.team.id}><td>{i+1}</td><td>{s.team.emoji} {s.team.name}</td><td>{s.matchWins}</td><td>{s.gameWins}</td><td>{s.pointsFor}</td><td>{s.pointsAgainst}</td><td className={s.pointDiff>=0?'diffpos':'diffneg'}>{s.pointDiff>0?'+':''}{s.pointDiff}</td></tr>)}</tbody></table>:<table><thead><tr><th>Rank</th><th>Player</th><th>Played</th><th>Wins</th><th>Losses</th><th>PF</th><th>PA</th><th>Diff</th><th>Win %</th></tr></thead><tbody>{rows.map((s,i)=><tr key={s.id}><td>{i===0?'🥇':i===1?'🥈':i===2?'🥉':i+1}</td><td><b>{s.player}</b></td><td>{s.played}</td><td>{s.wins}</td><td>{s.losses}</td><td>{s.pointsFor}</td><td>{s.pointsAgainst}</td><td className={s.pointDiff>=0?'diffpos':'diffneg'}>{s.pointDiff>0?'+':''}{s.pointDiff}</td><td>{s.winPct}%</td></tr>)}</tbody></table>}</div>}

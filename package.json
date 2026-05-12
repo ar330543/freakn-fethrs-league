@@ -1,7 +1,7 @@
 {
-  "name": "freakn-fethrs-league",
+  "name": "freakn-fethrs-production-v1",
   "private": true,
-  "version": "3.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -11,7 +11,8 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.53.0",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "lucide-react": "^0.468.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.0",

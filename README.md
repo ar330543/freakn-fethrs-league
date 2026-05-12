@@ -1,11 +1,16 @@
-# Freakn Fethrs League - Full Interactive MVP
+# Freakn Fethrs Production V1
 
-## Deploy update
-1. Replace your GitHub repository contents with these files.
+Fixes included:
+- Normalized Supabase tables instead of one JSON blob
+- Score-level updates so multiple friends do not overwrite each other
+- Realtime enabled for all main tables
+- Accurate Played/Wins/Losses/PF/PA/Diff standings
+- Multiple leagues and weeks
+- Undo last score update
+
+Deploy:
+1. Replace GitHub files with this ZIP.
 2. Run `sql/schema.sql` in Supabase SQL Editor.
-3. Commit changes to GitHub.
-4. Vercel will redeploy automatically.
-
-## Environment variables in Vercel
-- VITE_SUPABASE_URL
-- VITE_SUPABASE_ANON_KEY
+   Warning: this resets the old app tables.
+3. Commit to GitHub.
+4. Vercel will auto-deploy.
