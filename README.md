@@ -1,14 +1,15 @@
-# Freakn Fethrs Production V2
 
-Adds:
-- Auto team generation
-- Manual/handpicked team assignment
-- Validation errors for unrealistic asks
-- Score validation
-- Same normalized Supabase schema as Production V1
+# Freakn Fethrs Production V4
+
+Fixes:
+- Scores now show correctly when opening from a new browser/device.
+- Local blank draft values no longer override database scores.
+- Realtime score updates remain visible unless the user is actively editing that exact game.
+- Save/Clear removes local stale draft state after database update.
+- Reset Match Scores uses the same score-update flow for better realtime consistency.
 
 Deploy:
-1. Replace GitHub files with this ZIP.
-2. If you already ran Production V1 schema, you do not need to run SQL again.
-3. If not, run `sql/schema.sql`.
-4. Commit to GitHub and Vercel will deploy.
+1. Replace GitHub repo files with this ZIP.
+2. No SQL rerun needed if you already ran the normalized schema.
+3. Commit to GitHub.
+4. Vercel auto-deploys.
