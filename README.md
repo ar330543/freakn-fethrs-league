@@ -1,20 +1,22 @@
-# Freakn Fethrs Production V10 - Fixed Round-Robin Slots
+# Freakn Fethrs Production V12 - Weekly Cost Management
 
-Fix:
-- Teams no longer appear twice in the same slot.
-- Each slot is now a true round-robin round.
-- For 4 teams, each slot has 2 simultaneous matches and each team appears only once.
-- Example: Slot 1 will have two non-overlapping matches, such as Red vs Yellow and Blue vs Green.
+Adds:
+- Cost management inside every week
+- Cost per birdie
+- Number of birdies
+- Court booking cost
+- Player count override
+- Overall cost
+- Cost per person
 
-Important:
-- This affects newly generated schedules only.
-- Existing schedules already created in Supabase remain unchanged.
-- To apply it to an existing week, regenerate teams/schedule.
+Formula:
+((Cost per birdie × Number of birdies) + Court booking cost) ÷ Number of players
 
 SQL:
-- No SQL change needed.
+Run `sql/schema.sql` once in Supabase. This is non-destructive and only adds the `week_costs` table.
 
 Deploy:
 1. Replace GitHub files with this ZIP contents.
-2. Commit to GitHub.
-3. Confirm live app shows: Build: V10 Fixed Round-Robin Slots.
+2. Run `sql/schema.sql` in Supabase.
+3. Commit to GitHub.
+4. Confirm live app shows: Build: V12 Weekly Cost Management.

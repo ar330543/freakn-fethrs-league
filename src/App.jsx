@@ -66,6 +66,48 @@ function generateRoundRobinRounds(teamList) {
   return rounds;
 }
 
+
+function shuffleArray(items) {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function randomizedPairOrder(players) {
+  const allPairs = pairs(players);
+  if (!allPairs.length) return [];
+
+  if (players.length === 3 && allPairs.length === 3) {
+    return shuffleArray(allPairs);
+  }
+
+  const selected = [];
+  const appearances = Object.fromEntries(players.map((p) => [p.id, 0]));
+  let remaining = shuffleArray(allPairs);
+
+  while (selected.length < 3 && remaining.length) {
+    remaining.sort((a, b) => {
+      const aScore = appearances[a[0].id] + appearances[a[1].id] + Math.random();
+      const bScore = appearances[b[0].id] + appearances[b[1].id] + Math.random();
+      return aScore - bScore;
+    });
+    const pair = remaining.shift();
+    selected.push(pair);
+    appearances[pair[0].id]++;
+    appearances[pair[1].id]++;
+  }
+
+  while (selected.length < 3) {
+    selected.push(allPairs[selected.length % allPairs.length]);
+  }
+
+  return selected;
+}
+
+
 export default function App() {
   const [tab, setTab] = useState('dashboard');
   const [mode, setMode] = useState('auto');
@@ -84,6 +126,7 @@ export default function App() {
   const [error, setError] = useState('');
   const [manual, setManual] = useState({ teamCount: 4, assignments: {} });
   const [draft, setDraft] = useState({});
+  const [weekCost, setWeekCost] = useState(null);
   const [overallRows, setOverallRows] = useState([]);
   const [overallCalculatedAt, setOverallCalculatedAt] = useState(null);
 
@@ -92,7 +135,7 @@ export default function App() {
 
   useEffect(() => { boot(); }, []);
   useEffect(() => { if (leagueId) { loadWeeks(true); loadOverallLeaderboard(); } }, [leagueId]);
-  useEffect(() => { if (weekId) loadWeekData(); else clearWeekData(); }, [weekId]);
+  useEffect(() => { if (weekId) { loadWeekData(); loadWeekCost(); } else clearWeekData(); }, [weekId]);
 
   useEffect(() => {
     setDraft((current) => {
@@ -120,6 +163,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'matches' }, () => loadWeekData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'match_games' }, () => loadWeekData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_scores' }, () => loadWeekData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'week_costs' }, () => loadWeekCost())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'overall_leaderboards' }, () => loadOverallLeaderboard())
       .subscribe();
 
@@ -140,6 +184,7 @@ export default function App() {
     setGames([]);
     setScores([]);
     setDraft({});
+    setWeekCost(null);
   }
 
   async function boot() {
@@ -370,8 +415,8 @@ export default function App() {
     const gameRows = [];
 
     insertedMatches.forEach((match) => {
-      const t1Pairs = pairs(teamMap[match.team1_id]);
-      const t2Pairs = pairs(teamMap[match.team2_id]);
+      const t1Pairs = randomizedPairOrder(teamMap[match.team1_id]);
+      const t2Pairs = randomizedPairOrder(teamMap[match.team2_id]);
       if (!t1Pairs.length || !t2Pairs.length) throw new Error('Cannot create doubles games because a team has fewer than 2 players.');
 
       [0, 1, 2].forEach((n) => {
@@ -709,6 +754,100 @@ export default function App() {
     });
   }
 
+
+  async function loadWeekCost() {
+    if (!weekId) {
+      setWeekCost(null);
+      return;
+    }
+
+    const { data } = await supabase
+      .from('week_costs')
+      .select('*')
+      .eq('week_id', weekId)
+      .maybeSingle();
+
+    setWeekCost(data || {
+      week_id: weekId,
+      cost_per_birdie: 0,
+      birdie_count: 0,
+      court_booking_cost: 0,
+      player_count_override: null,
+    });
+  }
+
+  function updateCostDraft(field, value) {
+    const clean = value === '' ? '' : String(value).replace(/[^0-9.]/g, '');
+    setWeekCost((current) => ({
+      ...(current || {
+        week_id: weekId,
+        cost_per_birdie: 0,
+        birdie_count: 0,
+        court_booking_cost: 0,
+        player_count_override: null,
+      }),
+      [field]: clean,
+    }));
+  }
+
+  async function saveWeekCost() {
+    if (!weekId) return fail('No week is selected.');
+
+    const payload = {
+      week_id: weekId,
+      cost_per_birdie: Number(weekCost?.cost_per_birdie || 0),
+      birdie_count: Number(weekCost?.birdie_count || 0),
+      court_booking_cost: Number(weekCost?.court_booking_cost || 0),
+      player_count_override: weekCost?.player_count_override === '' || weekCost?.player_count_override == null
+        ? null
+        : Number(weekCost.player_count_override),
+      updated_at: new Date().toISOString(),
+    };
+
+    if (payload.cost_per_birdie < 0 || payload.birdie_count < 0 || payload.court_booking_cost < 0) {
+      return fail('Costs and birdie count cannot be negative.');
+    }
+
+    if (payload.player_count_override !== null && payload.player_count_override <= 0) {
+      return fail('Player count must be greater than 0.');
+    }
+
+    await act(async () => {
+      const { error: err } = await supabase.from('week_costs').upsert(payload);
+      if (err) throw err;
+      setWeekCost(payload);
+    });
+  }
+
+  async function clearWeekCost() {
+    if (!weekId) return fail('No week is selected.');
+    if (!confirm('Clear cost details for this week?')) return;
+
+    await act(async () => {
+      const { error: err } = await supabase.from('week_costs').delete().eq('week_id', weekId);
+      if (err) throw err;
+      setWeekCost({
+        week_id: weekId,
+        cost_per_birdie: 0,
+        birdie_count: 0,
+        court_booking_cost: 0,
+        player_count_override: null,
+      });
+    });
+  }
+
+  const costSummary = useMemo(() => {
+    const costPerBirdie = Number(weekCost?.cost_per_birdie || 0);
+    const birdieCount = Number(weekCost?.birdie_count || 0);
+    const courtCost = Number(weekCost?.court_booking_cost || 0);
+    const playerCount = Number(weekCost?.player_count_override || players.length || 0);
+    const birdieTotal = costPerBirdie * birdieCount;
+    const total = birdieTotal + courtCost;
+    const perPerson = playerCount > 0 ? total / playerCount : 0;
+    return { costPerBirdie, birdieCount, courtCost, playerCount, birdieTotal, total, perPerson };
+  }, [weekCost, players.length]);
+
+
   const playerStandings = useMemo(() => {
     const stats = {};
     players.forEach((p) => {
@@ -798,6 +937,7 @@ export default function App() {
     ['players', 'Players', Users],
     ['teams', 'Teams', Shield],
     ['matches', 'Matches', Swords],
+    ['costs', 'Costs', Flame],
     ['team', 'Team Standings', Trophy],
     ['playersStand', 'Player Standings', Star],
     ['overall', 'Overall Standings', Flame],
@@ -821,7 +961,7 @@ export default function App() {
 
         <div className="card">
           <b>{saving ? 'SAVING' : 'LIVE SYNC'}</b>
-          <p className="buildMarker">Build: V10 Fixed Round-Robin Slots</p>
+          <p className="buildMarker">Build: V12 Weekly Cost Management</p>
           <p className="muted">Score typing is local until Save is clicked.</p>
           <button className="btn secondary" onClick={undo}><RotateCcw size={16} /> Undo Last Score</button>
         </div>
@@ -985,6 +1125,61 @@ export default function App() {
             ))}
           </div>
         )}
+
+
+        {tab === 'costs' && (
+          <div className="card">
+            <h2>Weekly Cost Management</h2>
+            <div className="fireline" />
+            <p className="muted">
+              Enter the birdie cost, number of birdies used, court booking cost, and player count.
+              Player count defaults to the number of players added for this week.
+            </p>
+
+            <div className="grid stats">
+              <div className="card stat"><div><span className="muted">Birdie Total</span><b>${costSummary.birdieTotal.toFixed(2)}</b></div></div>
+              <div className="card stat"><div><span className="muted">Court Cost</span><b>${costSummary.courtCost.toFixed(2)}</b></div></div>
+              <div className="card stat"><div><span className="muted">Overall Cost</span><b>${costSummary.total.toFixed(2)}</b></div></div>
+              <div className="card stat"><div><span className="muted">Cost Per Person</span><b>${costSummary.perPerson.toFixed(2)}</b></div></div>
+            </div>
+
+            <div className="card">
+              <div className="row">
+                <label>Cost per birdie
+                  <input type="text" inputMode="decimal" value={weekCost?.cost_per_birdie ?? ''} onChange={(e) => updateCostDraft('cost_per_birdie', e.target.value)} placeholder="e.g. 3.50" />
+                </label>
+                <label>Number of birdies
+                  <input type="text" inputMode="decimal" value={weekCost?.birdie_count ?? ''} onChange={(e) => updateCostDraft('birdie_count', e.target.value)} placeholder="e.g. 12" />
+                </label>
+              </div>
+
+              <div className="row" style={{ marginTop: 12 }}>
+                <label>Court booking cost
+                  <input type="text" inputMode="decimal" value={weekCost?.court_booking_cost ?? ''} onChange={(e) => updateCostDraft('court_booking_cost', e.target.value)} placeholder="e.g. 160" />
+                </label>
+                <label>Number of players
+                  <input type="text" inputMode="numeric" value={weekCost?.player_count_override ?? ''} onChange={(e) => updateCostDraft('player_count_override', e.target.value)} placeholder={`Default: ${players.length}`} />
+                </label>
+              </div>
+
+              <div className="row" style={{ marginTop: 16 }}>
+                <button className="btn green" onClick={saveWeekCost}>Save Cost Details</button>
+                <button className="btn secondary" onClick={clearWeekCost}>Clear Cost Details</button>
+              </div>
+            </div>
+
+            <div className="card">
+              <h3>Formula</h3>
+              <p className="muted">((Cost per birdie × Number of birdies) + Court booking cost) ÷ Number of players</p>
+              <h2>
+                (${costSummary.costPerBirdie.toFixed(2)} × {costSummary.birdieCount}) + ${costSummary.courtCost.toFixed(2)}
+                {' '}÷ {costSummary.playerCount || 0}
+                {' '}= ${costSummary.perPerson.toFixed(2)} per person
+              </h2>
+            </div>
+          </div>
+        )}
+
 
         {tab === 'team' && <Standings rows={teamStandings} type="team" />}
         {tab === 'playersStand' && <Standings rows={playerStandings} type="player" />}

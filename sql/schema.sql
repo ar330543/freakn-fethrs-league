@@ -176,3 +176,22 @@ create policy "public all overall_leaderboard_history" on overall_leaderboard_hi
 
 do $$ begin alter publication supabase_realtime add table overall_leaderboards; exception when duplicate_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table overall_leaderboard_history; exception when duplicate_object then null; end $$;
+
+
+
+-- V12 non-destructive weekly cost management
+create table if not exists week_costs (
+  week_id uuid primary key references weeks(id) on delete cascade,
+  cost_per_birdie numeric default 0,
+  birdie_count numeric default 0,
+  court_booking_cost numeric default 0,
+  player_count_override int,
+  updated_at timestamptz default now()
+);
+
+alter table week_costs enable row level security;
+
+drop policy if exists "public all week_costs" on week_costs;
+create policy "public all week_costs" on week_costs for all using (true) with check (true);
+
+do $$ begin alter publication supabase_realtime add table week_costs; exception when duplicate_object then null; end $$;

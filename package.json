@@ -1,7 +1,7 @@
 {
-  "name": "freakn-fethrs-production-v10-slots",
+  "name": "freakn-fethrs-production-v12-cost-management",
   "private": true,
-  "version": "10.0.0",
+  "version": "12.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
