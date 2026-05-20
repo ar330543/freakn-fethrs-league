@@ -1,7 +1,14 @@
-# Freakn Fethrs Production V13 - Team Members Everywhere
+# Freakn Fethrs Production V14 - Latest Week Default
 
-Adds team members below team names wherever team/color labels are shown, including dashboard matches, match cards, and team standings.
+Fix:
+- When the app loads, each league now opens the latest week by default.
+- Weeks are ordered by newest created date first.
+- Existing scores, standings, teams, and weeks are untouched.
 
-No SQL change needed if V12 is already deployed.
+SQL:
+- No SQL change needed.
 
-Confirm build marker: Build: V13 Team Members Everywhere
+Deploy:
+1. Replace GitHub files with this ZIP contents.
+2. Commit to GitHub.
+3. Confirm live app shows: Build: V14 Latest Week Default.

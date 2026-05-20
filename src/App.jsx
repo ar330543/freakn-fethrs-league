@@ -210,7 +210,7 @@ export default function App() {
 
   async function loadWeeks(selectFirst = true) {
     if (!leagueId) return;
-    const { data, error: err } = await supabase.from('weeks').select('*').eq('league_id', leagueId).order('created_at');
+    const { data, error: err } = await supabase.from('weeks').select('*').eq('league_id', leagueId).order('created_at', { ascending: false });
     if (err) return fail(err.message);
 
     const list = data || [];
@@ -979,7 +979,7 @@ export default function App() {
 
         <div className="card">
           <b>{saving ? 'SAVING' : 'LIVE SYNC'}</b>
-          <p className="buildMarker">Build: V13 Team Members Everywhere</p>
+          <p className="buildMarker">Build: V14 Latest Week Default</p>
           <p className="muted">Score typing is local until Save is clicked.</p>
           <button className="btn secondary" onClick={undo}><RotateCcw size={16} /> Undo Last Score</button>
         </div>

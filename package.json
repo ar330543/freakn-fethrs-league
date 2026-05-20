@@ -1,7 +1,7 @@
 {
-  "name": "freakn-fethrs-production-v13-team-members",
+  "name": "freakn-fethrs-production-v14-latest-week",
   "private": true,
-  "version": "13.0.0",
+  "version": "14.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
