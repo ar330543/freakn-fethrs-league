@@ -1,7 +1,7 @@
 {
-  "name": "freakn-fethrs-production-v12-cost-management",
+  "name": "freakn-fethrs-production-v13-team-members",
   "private": true,
-  "version": "12.0.0",
+  "version": "13.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

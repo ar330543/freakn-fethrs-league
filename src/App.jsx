@@ -282,6 +282,24 @@ export default function App() {
       .filter(Boolean);
   }
 
+  function teamMembersText(teamId) {
+    const members = playersForTeam(teamId).map((p) => p.name);
+    return members.length ? members.join(' · ') : 'No players assigned';
+  }
+
+  function TeamLabel({ teamId }) {
+    const t = team(teamId);
+    if (!t) return <span>-</span>;
+    return (
+      <div>
+        <div className="pill" style={{ background: `${t.color}33`, color: t.color }}>
+          {t.emoji} {t.name}
+        </div>
+        <div className="teamMembers">{teamMembersText(teamId)}</div>
+      </div>
+    );
+  }
+
   async function addPlayers() {
     if (!weekId) return fail('No week is selected. Create or select a week before adding players.');
     const arr = names.split('\n').map((x) => x.trim()).filter(Boolean);
@@ -926,7 +944,7 @@ export default function App() {
     });
 
     return Object.values(stats)
-      .map((x) => ({ ...x, pointDiff: x.pointsFor - x.pointsAgainst }))
+      .map((x) => ({ ...x, pointDiff: x.pointsFor - x.pointsAgainst, team: { ...x.team, playersText: teamMembersText(x.team.id) } }))
       .sort((a, b) => b.matchWins - a.matchWins || b.pointDiff - a.pointDiff || b.pointsFor - a.pointsFor);
   }, [teams, matches, games, scores]);
 
@@ -961,7 +979,7 @@ export default function App() {
 
         <div className="card">
           <b>{saving ? 'SAVING' : 'LIVE SYNC'}</b>
-          <p className="buildMarker">Build: V12 Weekly Cost Management</p>
+          <p className="buildMarker">Build: V13 Team Members Everywhere</p>
           <p className="muted">Score typing is local until Save is clicked.</p>
           <button className="btn secondary" onClick={undo}><RotateCcw size={16} /> Undo Last Score</button>
         </div>
@@ -1084,6 +1102,11 @@ export default function App() {
                 <div className="row">
                   <h3>Slot {match.slot} · Court {match.court} · {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}</h3>
                   <button className="btn danger" onClick={() => resetMatchScores(match.id)}>Reset Match Scores</button>
+                </div>
+                <div className="teamVsBlock">
+                  <TeamLabel teamId={match.team1_id} />
+                  <div className="scoreBig">VS</div>
+                  <TeamLabel teamId={match.team2_id} />
                 </div>
 
                 {games.filter((g) => g.match_id === match.id).sort((a, b) => a.game_number - b.game_number).map((game) => {
@@ -1246,7 +1269,12 @@ function Standings({ rows, type }) {
             {rows.map((s, i) => (
               <tr key={s.team.id}>
                 <td>{i + 1}</td>
-                <td>{s.team.emoji} {s.team.name}</td>
+                <td>
+                    <div className="pill" style={{ background: `${s.team.color}33`, color: s.team.color }}>
+                      {s.team.emoji} {s.team.name}
+                    </div>
+                    <div className="teamMembers">{s.team.playersText || 'No players assigned'}</div>
+                  </td>
                 <td>{s.matchWins}</td>
                 <td>{s.gameWins}</td>
                 <td>{s.pointsFor}</td>
