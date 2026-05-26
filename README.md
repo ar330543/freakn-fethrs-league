@@ -1,14 +1,16 @@
-# Freakn Fethrs Production V14 - Latest Week Default
+# Freakn Fethrs Production V15 - Avoid Last Week Teams
 
-Fix:
-- When the app loads, each league now opens the latest week by default.
-- Weeks are ordered by newest created date first.
-- Existing scores, standings, teams, and weeks are untouched.
+Adds:
+- Random team generation checks the immediately previous week in the same league.
+- It avoids generating any team with the exact same full set of players as last week.
+- If it cannot find a fully different combination after 500 attempts, it shows an error and asks you to change team/player count or use Handpick Teams.
 
-SQL:
+Important:
+- This affects newly generated random teams only.
+- Existing weeks, schedules, scores, standings, and costs are untouched.
 - No SQL change needed.
 
 Deploy:
 1. Replace GitHub files with this ZIP contents.
 2. Commit to GitHub.
-3. Confirm live app shows: Build: V14 Latest Week Default.
+3. Confirm live app shows: Build: V15 Avoid Last Week Teams.

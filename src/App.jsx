@@ -108,6 +108,34 @@ function randomizedPairOrder(players) {
 }
 
 
+
+function teamSignature(playerIds) {
+  return [...playerIds].sort().join('|');
+}
+
+function hasRepeatedTeam(candidateTeams, previousTeamSignatures) {
+  return candidateTeams.some((team) =>
+    previousTeamSignatures.has(teamSignature(team.players.map((p) => p.id)))
+  );
+}
+
+function buildRandomTeamDefs(players, count) {
+  const shuffled = [...players].sort(() => Math.random() - 0.5);
+  const defs = Array.from({ length: count }, (_, i) => ({
+    name: teamColors[i % teamColors.length][0],
+    emoji: teamColors[i % teamColors.length][1],
+    color: teamColors[i % teamColors.length][2],
+    players: [],
+  }));
+
+  shuffled.forEach((player, index) => {
+    defs[index % count].players.push(player);
+  });
+
+  return defs;
+}
+
+
 export default function App() {
   const [tab, setTab] = useState('dashboard');
   const [mode, setMode] = useState('auto');
@@ -453,6 +481,45 @@ export default function App() {
     if (gErr) throw gErr;
   }
 
+
+  async function getPreviousWeekTeamSignatures() {
+    if (!leagueId || !weekId) return new Set();
+
+    const currentWeek = weeks.find((w) => w.id === weekId);
+    if (!currentWeek) return new Set();
+
+    const previousWeeks = weeks
+      .filter((w) => w.id !== weekId && new Date(w.created_at) < new Date(currentWeek.created_at))
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+
+    const previousWeek = previousWeeks[0];
+    if (!previousWeek) return new Set();
+
+    const { data: previousTeams, error: teamErr } = await supabase
+      .from('teams')
+      .select('id')
+      .eq('week_id', previousWeek.id);
+    if (teamErr) throw teamErr;
+
+    const previousTeamIds = (previousTeams || []).map((t) => t.id);
+    if (!previousTeamIds.length) return new Set();
+
+    const { data: previousLinks, error: linkErr } = await supabase
+      .from('team_players')
+      .select('team_id, player_id')
+      .in('team_id', previousTeamIds);
+    if (linkErr) throw linkErr;
+
+    const byTeam = {};
+    (previousLinks || []).forEach((link) => {
+      if (!byTeam[link.team_id]) byTeam[link.team_id] = [];
+      byTeam[link.team_id].push(link.player_id);
+    });
+
+    return new Set(Object.values(byTeam).map(teamSignature));
+  }
+
+
   async function randomTeams() {
     if (!weekId) return fail('No week is selected. Create or select a week first.');
     const count = Number(prompt('Number of teams?', Math.max(2, Math.ceil(players.length / 3))) || 4);
@@ -460,15 +527,26 @@ export default function App() {
     if (validation) return fail(validation);
 
     await act(async () => {
-      const shuffled = [...players].sort(() => Math.random() - 0.5);
-      const defs = Array.from({ length: count }, (_, i) => ({
-        name: teamColors[i % teamColors.length][0],
-        emoji: teamColors[i % teamColors.length][1],
-        color: teamColors[i % teamColors.length][2],
-        players: [],
-      }));
+      const previousTeamSignatures = await getPreviousWeekTeamSignatures();
 
-      shuffled.forEach((p, i) => defs[i % count].players.push(p));
+      let defs = null;
+      let attempts = 0;
+      const maxAttempts = 500;
+
+      while (attempts < maxAttempts) {
+        attempts++;
+        const candidate = buildRandomTeamDefs(players, count);
+
+        if (!hasRepeatedTeam(candidate, previousTeamSignatures)) {
+          defs = candidate;
+          break;
+        }
+      }
+
+      if (!defs) {
+        throw new Error('Could not generate teams that are completely different from last week after 500 attempts. Try changing player count, team count, or use Handpick Teams.');
+      }
+
       await buildTeamsAndSchedule(defs);
     });
   }
@@ -979,7 +1057,7 @@ export default function App() {
 
         <div className="card">
           <b>{saving ? 'SAVING' : 'LIVE SYNC'}</b>
-          <p className="buildMarker">Build: V14 Latest Week Default</p>
+          <p className="buildMarker">Build: V15 Avoid Last Week Teams</p>
           <p className="muted">Score typing is local until Save is clicked.</p>
           <button className="btn secondary" onClick={undo}><RotateCcw size={16} /> Undo Last Score</button>
         </div>

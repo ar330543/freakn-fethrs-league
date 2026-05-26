@@ -1,7 +1,7 @@
 {
-  "name": "freakn-fethrs-production-v14-latest-week",
+  "name": "freakn-fethrs-production-v15-avoid-last-week-teams",
   "private": true,
-  "version": "14.0.0",
+  "version": "15.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
