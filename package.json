@@ -1,7 +1,7 @@
 {
-  "name": "freakn-fethrs-production-v15-avoid-last-week-teams",
+  "name": "freakn-fethrs-production-v16-no-repeat-teammates",
   "private": true,
-  "version": "15.0.0",
+  "version": "16.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",

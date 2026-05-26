@@ -109,13 +109,24 @@ function randomizedPairOrder(players) {
 
 
 
-function teamSignature(playerIds) {
-  return [...playerIds].sort().join('|');
+function playerPairKey(a, b) {
+  return [a, b].sort().join('|');
 }
 
-function hasRepeatedTeam(candidateTeams, previousTeamSignatures) {
+function teamPairKeys(playerIds) {
+  const ids = [...playerIds];
+  const keys = [];
+  for (let i = 0; i < ids.length; i++) {
+    for (let j = i + 1; j < ids.length; j++) {
+      keys.push(playerPairKey(ids[i], ids[j]));
+    }
+  }
+  return keys;
+}
+
+function hasRepeatedTeammates(candidateTeams, previousTeammatePairs) {
   return candidateTeams.some((team) =>
-    previousTeamSignatures.has(teamSignature(team.players.map((p) => p.id)))
+    teamPairKeys(team.players.map((p) => p.id)).some((pairKey) => previousTeammatePairs.has(pairKey))
   );
 }
 
@@ -482,7 +493,7 @@ export default function App() {
   }
 
 
-  async function getPreviousWeekTeamSignatures() {
+  async function getPreviousWeekTeammatePairs() {
     if (!leagueId || !weekId) return new Set();
 
     const currentWeek = weeks.find((w) => w.id === weekId);
@@ -516,35 +527,47 @@ export default function App() {
       byTeam[link.team_id].push(link.player_id);
     });
 
-    return new Set(Object.values(byTeam).map(teamSignature));
+    const repeatedPairs = new Set();
+    Object.values(byTeam).forEach((playerIds) => {
+      teamPairKeys(playerIds).forEach((pairKey) => repeatedPairs.add(pairKey));
+    });
+
+    return repeatedPairs;
   }
 
 
   async function randomTeams() {
     if (!weekId) return fail('No week is selected. Create or select a week first.');
-    const count = Number(prompt('Number of teams?', Math.max(2, Math.ceil(players.length / 3))) || 4);
+
+    const suggestedTeamCount = Math.max(2, Math.ceil(players.length / 3));
+    const response = prompt('Number of teams?', suggestedTeamCount);
+    if (response === null) return;
+
+    const count = Number(response || suggestedTeamCount);
     const validation = validateTeamAsk(players.length, count);
     if (validation) return fail(validation);
 
     await act(async () => {
-      const previousTeamSignatures = await getPreviousWeekTeamSignatures();
+      const previousTeammatePairs = await getPreviousWeekTeammatePairs();
 
       let defs = null;
       let attempts = 0;
-      const maxAttempts = 500;
+      const maxAttempts = 2000;
 
       while (attempts < maxAttempts) {
         attempts++;
         const candidate = buildRandomTeamDefs(players, count);
 
-        if (!hasRepeatedTeam(candidate, previousTeamSignatures)) {
+        if (!hasRepeatedTeammates(candidate, previousTeammatePairs)) {
           defs = candidate;
           break;
         }
       }
 
       if (!defs) {
-        throw new Error('Could not generate teams that are completely different from last week after 500 attempts. Try changing player count, team count, or use Handpick Teams.');
+        throw new Error(
+          'Could not generate teams without repeating last week teammate pairs after 2000 attempts. This can happen when the same players return and team sizes are large. Try changing team count, adding more players, or use Handpick Teams.'
+        );
       }
 
       await buildTeamsAndSchedule(defs);
@@ -1057,7 +1080,7 @@ export default function App() {
 
         <div className="card">
           <b>{saving ? 'SAVING' : 'LIVE SYNC'}</b>
-          <p className="buildMarker">Build: V15 Avoid Last Week Teams</p>
+          <p className="buildMarker">Build: V16 No Repeat Teammates</p>
           <p className="muted">Score typing is local until Save is clicked.</p>
           <button className="btn secondary" onClick={undo}><RotateCcw size={16} /> Undo Last Score</button>
         </div>
