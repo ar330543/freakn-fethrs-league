@@ -1,17 +1,25 @@
-# Freakn Fethrs Production V16 - No Repeat Teammates
+# Freakn Fethrs Production V17 - Smart Team History Rules
 
-Fixes:
-- Random team generation now blocks any pair of players who were teammates in the immediately previous week.
-- This is stronger than V15, which only blocked the exact full team from repeating.
-- If you click Cancel on the team count prompt, no schedule is generated.
-- Existing weeks, scores, standings, costs, and schedules are untouched.
+Adds your preferred random team generation hierarchy:
+
+1. First preference:
+   - In that league, no one should be grouped with the same individual again.
+
+2. If impossible:
+   - Avoid repeats from the last 2 weeks.
+
+3. Last resort:
+   - Avoid repeats from the immediately previous week, so no one plays with the same person for 2 consecutive weeks.
+
+Other fix retained:
+- Clicking Cancel on the random team prompt does not generate teams.
 
 Important:
-- This applies only when generating new random teams.
-- Existing generated schedules remain as-is.
+- This applies only to newly generated random teams.
+- Existing weeks, scores, teams, schedules, costs, and standings are untouched.
 - No SQL change needed.
 
 Deploy:
 1. Replace GitHub files with this ZIP contents.
 2. Commit to GitHub.
-3. Confirm live app shows: Build: V16 No Repeat Teammates.
+3. Confirm live app shows: Build: V17 Smart Team History Rules.

@@ -493,48 +493,88 @@ export default function App() {
   }
 
 
-  async function getPreviousWeekTeammatePairs() {
-    if (!leagueId || !weekId) return new Set();
+
+  async function getHistoricalTeammatePairSets() {
+    const empty = { allLeague: new Set(), lastTwoWeeks: new Set(), lastWeek: new Set() };
+    if (!leagueId || !weekId) return empty;
 
     const currentWeek = weeks.find((w) => w.id === weekId);
-    if (!currentWeek) return new Set();
+    if (!currentWeek) return empty;
 
-    const previousWeeks = weeks
+    const historicalWeeks = weeks
       .filter((w) => w.id !== weekId && new Date(w.created_at) < new Date(currentWeek.created_at))
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-    const previousWeek = previousWeeks[0];
-    if (!previousWeek) return new Set();
+    if (!historicalWeeks.length) return empty;
 
-    const { data: previousTeams, error: teamErr } = await supabase
+    const allWeekIds = historicalWeeks.map((w) => w.id);
+    const lastTwoWeekIds = historicalWeeks.slice(0, 2).map((w) => w.id);
+    const lastWeekId = historicalWeeks[0]?.id;
+
+    const { data: historicalTeams, error: teamErr } = await supabase
       .from('teams')
-      .select('id')
-      .eq('week_id', previousWeek.id);
+      .select('id, week_id')
+      .in('week_id', allWeekIds);
     if (teamErr) throw teamErr;
 
-    const previousTeamIds = (previousTeams || []).map((t) => t.id);
-    if (!previousTeamIds.length) return new Set();
+    const teamIds = (historicalTeams || []).map((t) => t.id);
+    if (!teamIds.length) return empty;
 
-    const { data: previousLinks, error: linkErr } = await supabase
+    const { data: historicalLinks, error: linkErr } = await supabase
       .from('team_players')
       .select('team_id, player_id')
-      .in('team_id', previousTeamIds);
+      .in('team_id', teamIds);
     if (linkErr) throw linkErr;
 
-    const byTeam = {};
-    (previousLinks || []).forEach((link) => {
-      if (!byTeam[link.team_id]) byTeam[link.team_id] = [];
-      byTeam[link.team_id].push(link.player_id);
+    const teamWeekById = Object.fromEntries((historicalTeams || []).map((t) => [t.id, t.week_id]));
+    const playersByTeam = {};
+
+    (historicalLinks || []).forEach((link) => {
+      if (!playersByTeam[link.team_id]) playersByTeam[link.team_id] = [];
+      playersByTeam[link.team_id].push(link.player_id);
     });
 
-    const repeatedPairs = new Set();
-    Object.values(byTeam).forEach((playerIds) => {
-      teamPairKeys(playerIds).forEach((pairKey) => repeatedPairs.add(pairKey));
+    const allLeague = new Set();
+    const lastTwoWeeks = new Set();
+    const lastWeek = new Set();
+
+    Object.entries(playersByTeam).forEach(([teamId, playerIds]) => {
+      const weekForTeam = teamWeekById[teamId];
+      const pairKeys = teamPairKeys(playerIds);
+
+      pairKeys.forEach((pairKey) => {
+        allLeague.add(pairKey);
+        if (lastTwoWeekIds.includes(weekForTeam)) lastTwoWeeks.add(pairKey);
+        if (weekForTeam === lastWeekId) lastWeek.add(pairKey);
+      });
     });
 
-    return repeatedPairs;
+    return { allLeague, lastTwoWeeks, lastWeek };
   }
 
+  function findTeamDefsWithAvoidance(count, historicalPairs) {
+    const levels = [
+      { name: 'entire league history', pairs: historicalPairs.allLeague },
+      { name: 'last 2 weeks', pairs: historicalPairs.lastTwoWeeks },
+      { name: 'last week only', pairs: historicalPairs.lastWeek },
+    ];
+
+    for (const level of levels) {
+      let attempts = 0;
+      const maxAttempts = 2000;
+
+      while (attempts < maxAttempts) {
+        attempts++;
+        const candidate = buildRandomTeamDefs(players, count);
+
+        if (!hasRepeatedTeammates(candidate, level.pairs)) {
+          return { defs: candidate, levelUsed: level.name, relaxed: level.name !== 'entire league history' };
+        }
+      }
+    }
+
+    return { defs: null, levelUsed: null, relaxed: true };
+  }
 
   async function randomTeams() {
     if (!weekId) return fail('No week is selected. Create or select a week first.');
@@ -548,29 +588,18 @@ export default function App() {
     if (validation) return fail(validation);
 
     await act(async () => {
-      const previousTeammatePairs = await getPreviousWeekTeammatePairs();
+      const historicalPairs = await getHistoricalTeammatePairSets();
+      const result = findTeamDefsWithAvoidance(count, historicalPairs);
 
-      let defs = null;
-      let attempts = 0;
-      const maxAttempts = 2000;
-
-      while (attempts < maxAttempts) {
-        attempts++;
-        const candidate = buildRandomTeamDefs(players, count);
-
-        if (!hasRepeatedTeammates(candidate, previousTeammatePairs)) {
-          defs = candidate;
-          break;
-        }
+      if (!result.defs) {
+        throw new Error('Could not generate teams without repeating teammates from last week. Try changing team count, adding more players, or use Handpick Teams.');
       }
 
-      if (!defs) {
-        throw new Error(
-          'Could not generate teams without repeating last week teammate pairs after 2000 attempts. This can happen when the same players return and team sizes are large. Try changing team count, adding more players, or use Handpick Teams.'
-        );
+      if (result.relaxed) {
+        alert(`Could not avoid all league-history repeats. Generated teams using the best available rule: avoid repeats from ${result.levelUsed}.`);
       }
 
-      await buildTeamsAndSchedule(defs);
+      await buildTeamsAndSchedule(result.defs);
     });
   }
 
@@ -1080,7 +1109,7 @@ export default function App() {
 
         <div className="card">
           <b>{saving ? 'SAVING' : 'LIVE SYNC'}</b>
-          <p className="buildMarker">Build: V16 No Repeat Teammates</p>
+          <p className="buildMarker">Build: V17 Smart Team History Rules</p>
           <p className="muted">Score typing is local until Save is clicked.</p>
           <button className="btn secondary" onClick={undo}><RotateCcw size={16} /> Undo Last Score</button>
         </div>

@@ -1,7 +1,7 @@
 {
-  "name": "freakn-fethrs-production-v16-no-repeat-teammates",
+  "name": "freakn-fethrs-production-v17-smart-team-history",
   "private": true,
-  "version": "16.0.0",
+  "version": "17.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
