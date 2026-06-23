@@ -1,0 +1,11 @@
+{
+  "release": "V18.2",
+  "buildMarker": "Build: V18.2 Team Size Format Fix",
+  "databaseMigrationRequired": false,
+  "dataDestructive": false,
+  "teamFormats": {
+    "2": "Each team plays every other team once; one doubles game per team matchup.",
+    "3": "Existing team-game format; three doubles games per team matchup.",
+    "4": "Existing team-game format; three doubles games per team matchup."
+  }
+}
