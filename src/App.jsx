@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
   Home, Users, Shield, Swords, Trophy, Star, Settings,
-  Flame, Plus, Trash2, RotateCcw, Download, AlertTriangle
+  Flame, Plus, Trash2, RotateCcw, Download, AlertTriangle, TrendingUp
 } from 'lucide-react';
 
 const supabase = createClient(
@@ -276,6 +276,257 @@ function buildConstraintAwareTeams(teamPlayers, count, forbiddenPairs) {
 }
 
 
+function computeStreak(orderedResultsForPlayer) {
+  let streak = 0;
+
+  for (let i = orderedResultsForPlayer.length - 1; i >= 0; i--) {
+    const won = orderedResultsForPlayer[i].won;
+
+    if (won === null) {
+      if (streak === 0) continue;
+      break;
+    }
+
+    if (streak === 0) streak = won ? 1 : -1;
+    else if (streak > 0 && won) streak += 1;
+    else if (streak < 0 && !won) streak -= 1;
+    else break;
+  }
+
+  return streak;
+}
+
+const FORM_RECENCY_DECAY = 0.5;
+
+function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows) {
+  const weekOrder = [...weeksInScope].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+  const weekIndex = Object.fromEntries(weekOrder.map((w, i) => [w.id, i]));
+
+  const matchById = Object.fromEntries(matchesRows.map((m) => [m.id, m]));
+  const scoreByGame = Object.fromEntries(scoresRows.map((s) => [s.game_id, s]));
+  const normalizedNameById = Object.fromEntries(playersRows.map((p) => [p.id, normalizePlayerName(p.name)]));
+
+  const displayNameByNormalized = {};
+  [...playersRows]
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+    .forEach((p) => { displayNameByNormalized[normalizePlayerName(p.name)] = p.name; });
+
+  const orderableGames = gamesRows
+    .map((g) => {
+      const match = matchById[g.match_id];
+      const weekIdx = match ? weekIndex[match.week_id] : undefined;
+      const score = scoreByGame[g.id];
+      if (weekIdx === undefined || !score || score.score1 == null || score.score2 == null) return null;
+      return { game: g, match, weekIdx, score1: Number(score.score1), score2: Number(score.score2) };
+    })
+    .filter(Boolean)
+    .sort((a, b) =>
+      a.weekIdx - b.weekIdx ||
+      Number(a.match.slot) - Number(b.match.slot) ||
+      String(a.match.court).localeCompare(String(b.match.court)) ||
+      Number(a.game.game_number) - Number(b.game.game_number)
+    );
+
+  const byPlayer = {};
+
+  function ensure(name) {
+    if (!byPlayer[name]) byPlayer[name] = { orderedResults: [], perWeek: {} };
+    return byPlayer[name];
+  }
+
+  orderableGames.forEach(({ game, weekIdx, score1, score2 }) => {
+    const record = (playerId, pf, pa, won) => {
+      const name = normalizedNameById[playerId];
+      if (!name) return;
+
+      const p = ensure(name);
+      p.orderedResults.push({ weekIdx, won, pf, pa });
+
+      if (won !== null) {
+        if (!p.perWeek[weekIdx]) p.perWeek[weekIdx] = { wins: 0, losses: 0 };
+        won ? p.perWeek[weekIdx].wins++ : p.perWeek[weekIdx].losses++;
+      }
+    };
+
+    const won1 = score1 > score2 ? true : score2 > score1 ? false : null;
+    [game.t1_player1_id, game.t1_player2_id].forEach((id) => record(id, score1, score2, won1));
+    [game.t2_player1_id, game.t2_player2_id].forEach((id) => record(id, score2, score1, won1 === null ? null : !won1));
+  });
+
+  return Object.entries(byPlayer).map(([normalizedName, p]) => {
+    const streak = computeStreak(p.orderedResults);
+    const gamesPlayed = p.orderedResults.length;
+    const wins = p.orderedResults.filter((r) => r.won === true).length;
+    const losses = p.orderedResults.filter((r) => r.won === false).length;
+    const pointsFor = p.orderedResults.reduce((s, r) => s + r.pf, 0);
+    const pointsAgainst = p.orderedResults.reduce((s, r) => s + r.pa, 0);
+
+    const playedWeekIdxs = Object.keys(p.perWeek).map(Number);
+    const lastPlayedIdx = playedWeekIdxs.length ? Math.max(...playedWeekIdxs) : null;
+
+    let rankScore = 0;
+    playedWeekIdxs.forEach((wi) => {
+      const netWins = p.perWeek[wi].wins - p.perWeek[wi].losses;
+      const weeksAgo = lastPlayedIdx - wi;
+      rankScore += netWins * (FORM_RECENCY_DECAY ** weeksAgo);
+    });
+
+    return {
+      normalizedName,
+      displayName: displayNameByNormalized[normalizedName] || normalizedName,
+      streak,
+      gamesPlayed,
+      wins,
+      losses,
+      pointsFor,
+      pointsAgainst,
+      pointDiff: pointsFor - pointsAgainst,
+      rankScore,
+    };
+  }).sort((a, b) =>
+    b.rankScore - a.rankScore ||
+    b.pointDiff - a.pointDiff ||
+    b.gamesPlayed - a.gamesPlayed ||
+    a.displayName.localeCompare(b.displayName)
+  );
+}
+
+async function fetchFormRawData(weekIds) {
+  if (!weekIds.length) return { playersRows: [], matchesRows: [], gamesRows: [], scoresRows: [] };
+
+  const [playersRes, matchesRes] = await Promise.all([
+    supabase.from('players').select('id, week_id, name, created_at').in('week_id', weekIds),
+    supabase.from('matches').select('id, week_id, slot, court').in('week_id', weekIds),
+  ]);
+  if (playersRes.error) throw playersRes.error;
+  if (matchesRes.error) throw matchesRes.error;
+
+  const matchIds = (matchesRes.data || []).map((m) => m.id);
+  const gamesRes = matchIds.length
+    ? await supabase.from('match_games').select('id, match_id, game_number, t1_player1_id, t1_player2_id, t2_player1_id, t2_player2_id').in('match_id', matchIds)
+    : { data: [], error: null };
+  if (gamesRes.error) throw gamesRes.error;
+
+  const gameIds = (gamesRes.data || []).map((g) => g.id);
+  const scoresRes = gameIds.length
+    ? await supabase.from('game_scores').select('game_id, score1, score2').in('game_id', gameIds)
+    : { data: [], error: null };
+  if (scoresRes.error) throw scoresRes.error;
+
+  return {
+    playersRows: playersRes.data || [],
+    matchesRows: matchesRes.data || [],
+    gamesRows: gamesRes.data || [],
+    scoresRows: scoresRes.data || [],
+  };
+}
+
+function buildSkillBalancedTeams(teamPlayers, count, forbiddenPairs, rankScoreByNormalizedName) {
+  const normalizedNames = teamPlayers.map((player) => normalizePlayerName(player.name));
+  const duplicates = normalizedNames.filter((name, index) => normalizedNames.indexOf(name) !== index);
+
+  if (duplicates.length) {
+    throw new Error(
+      `Duplicate player names detected: ${[...new Set(duplicates)].join(', ')}. Player names must be unique inside a week so teammate history can be checked correctly.`
+    );
+  }
+
+  const conflictDegree = {};
+  normalizedNames.forEach((name) => { conflictDegree[name] = 0; });
+
+  for (let i = 0; i < normalizedNames.length; i++) {
+    for (let j = i + 1; j < normalizedNames.length; j++) {
+      if (forbiddenPairs.has(teammatePairKey(normalizedNames[i], normalizedNames[j]))) {
+        conflictDegree[normalizedNames[i]]++;
+        conflictDegree[normalizedNames[j]]++;
+      }
+    }
+  }
+
+  const rankOf = (player) => rankScoreByNormalizedName[normalizePlayerName(player.name)] ?? 0;
+  const RANK_EPSILON = 0.05;
+
+  const maxRestarts = 160;
+  const maxNodesPerRestart = 120000;
+
+  for (let restart = 0; restart < maxRestarts; restart++) {
+    const defs = buildBalancedTeamDefs(teamPlayers, count).map((d) => ({ ...d, rankTotal: 0 }));
+
+    const orderedPlayers = shuffled(teamPlayers).sort((a, b) => {
+      const rankDiff = rankOf(b) - rankOf(a);
+      if (Math.abs(rankDiff) > RANK_EPSILON) return rankDiff;
+
+      const degreeDifference =
+        (conflictDegree[normalizePlayerName(b.name)] || 0) -
+        (conflictDegree[normalizePlayerName(a.name)] || 0);
+
+      return degreeDifference || Math.random() - 0.5;
+    });
+
+    let visitedNodes = 0;
+
+    function canJoin(player, team) {
+      if (team.players.length >= team.targetSize) return false;
+
+      return team.players.every((member) =>
+        !forbiddenPairs.has(teammatePairKey(player.name, member.name))
+      );
+    }
+
+    function assign(index) {
+      visitedNodes++;
+      if (visitedNodes > maxNodesPerRestart) return false;
+      if (index >= orderedPlayers.length) return true;
+
+      const player = orderedPlayers[index];
+      const playerRank = rankOf(player);
+
+      const candidateIndexes = shuffled(
+        defs
+          .map((team, teamIndex) => ({ team, teamIndex }))
+          .filter(({ team }) => canJoin(player, team))
+      )
+        .sort((a, b) =>
+          a.team.rankTotal - b.team.rankTotal ||
+          a.team.players.length - b.team.players.length ||
+          b.team.targetSize - a.team.targetSize
+        )
+        .map(({ teamIndex }) => teamIndex);
+
+      const seenEquivalentTeams = new Set();
+
+      for (const teamIndex of candidateIndexes) {
+        const team = defs[teamIndex];
+        const teamState = team.players
+          .map((member) => normalizePlayerName(member.name))
+          .sort()
+          .join('|');
+
+        const symmetryKey = `${team.targetSize}:${teamState}`;
+        if (seenEquivalentTeams.has(symmetryKey)) continue;
+        seenEquivalentTeams.add(symmetryKey);
+
+        team.players.push(player);
+        team.rankTotal += playerRank;
+
+        if (assign(index + 1)) return true;
+
+        team.rankTotal -= playerRank;
+        team.players.pop();
+      }
+
+      return false;
+    }
+
+    if (assign(0)) {
+      return defs.map(({ targetSize, rankTotal, ...team }) => team);
+    }
+  }
+
+  return null;
+}
+
+
 export default function App() {
   const [tab, setTab] = useState('dashboard');
   const [mode, setMode] = useState('auto');
@@ -300,6 +551,7 @@ export default function App() {
   const [quickTeam1Id, setQuickTeam1Id] = useState('');
   const [quickTeam2Id, setQuickTeam2Id] = useState('');
   const [playerGameSearch, setPlayerGameSearch] = useState('');
+  const [rankingRows, setRankingRows] = useState([]);
 
   const league = leagues.find((l) => l.id === leagueId);
   const week = weeks.find((w) => w.id === weekId);
@@ -307,6 +559,9 @@ export default function App() {
   useEffect(() => { boot(); }, []);
   useEffect(() => { if (leagueId) { loadWeeks(true); loadOverallLeaderboard(); } }, [leagueId]);
   useEffect(() => { if (weekId) { loadWeekData(); loadWeekCost(); } else clearWeekData(); }, [weekId]);
+  useEffect(() => {
+    if (tab === 'rankings' && leagueId) loadLeagueRankings();
+  }, [tab, leagueId, weeks, players, games, scores]);
 
   useEffect(() => {
     setQuickTeam1Id('');
@@ -764,10 +1019,11 @@ export default function App() {
 
     if (!leagueId || !weekId) return empty;
 
-    const currentWeek = weeks.find((item) => item.id === weekId);
+    const leagueWeeks = await fetchLeagueWeeks();
+    const currentWeek = leagueWeeks.find((item) => item.id === weekId);
     if (!currentWeek) return empty;
 
-    const historicalWeeks = weeks
+    const historicalWeeks = leagueWeeks
       .filter(
         (item) =>
           item.id !== weekId &&
@@ -850,6 +1106,48 @@ export default function App() {
     return { allLeague, lastTwoWeeks, lastWeek };
   }
 
+  async function fetchLeagueWeeks() {
+    if (!leagueId) return [];
+    const { data, error: err } = await supabase
+      .from('weeks')
+      .select('id, name, created_at')
+      .eq('league_id', leagueId);
+    if (err) throw err;
+    return data || [];
+  }
+
+  async function getHistoricalFormStats() {
+    if (!leagueId || !weekId) return [];
+
+    const leagueWeeks = await fetchLeagueWeeks();
+    const currentWeek = leagueWeeks.find((item) => item.id === weekId);
+    if (!currentWeek) return [];
+
+    const historicalWeeks = leagueWeeks.filter(
+      (item) => item.id !== weekId && new Date(item.created_at) < new Date(currentWeek.created_at)
+    );
+    if (!historicalWeeks.length) return [];
+
+    const raw = await fetchFormRawData(historicalWeeks.map((item) => item.id));
+    return computeLeagueFormStats(historicalWeeks, raw.playersRows, raw.matchesRows, raw.gamesRows, raw.scoresRows);
+  }
+
+  async function loadLeagueRankings() {
+    if (!leagueId) {
+      setRankingRows([]);
+      return;
+    }
+
+    const leagueWeeks = await fetchLeagueWeeks();
+    if (!leagueWeeks.length) {
+      setRankingRows([]);
+      return;
+    }
+
+    const raw = await fetchFormRawData(leagueWeeks.map((item) => item.id));
+    setRankingRows(computeLeagueFormStats(leagueWeeks, raw.playersRows, raw.matchesRows, raw.gamesRows, raw.scoresRows));
+  }
+
   function findTeamDefsWithAvoidance(count, historicalPairs) {
     const levels = [
       {
@@ -871,6 +1169,44 @@ export default function App() {
 
     for (const level of levels) {
       const defs = buildConstraintAwareTeams(players, count, level.pairs);
+
+      if (defs && !hasRepeatedTeammates(defs, level.pairs)) {
+        return {
+          defs,
+          levelUsed: level.name,
+          relaxed: level.relaxed,
+        };
+      }
+    }
+
+    return {
+      defs: null,
+      levelUsed: null,
+      relaxed: true,
+    };
+  }
+
+  function findSkillBalancedTeamDefsWithAvoidance(count, historicalPairs, rankScoreByNormalizedName) {
+    const levels = [
+      {
+        name: 'the entire league history',
+        pairs: historicalPairs.allLeague,
+        relaxed: false,
+      },
+      {
+        name: 'the last 2 weeks',
+        pairs: historicalPairs.lastTwoWeeks,
+        relaxed: true,
+      },
+      {
+        name: 'the immediately previous week',
+        pairs: historicalPairs.lastWeek,
+        relaxed: true,
+      },
+    ];
+
+    for (const level of levels) {
+      const defs = buildSkillBalancedTeams(players, count, level.pairs, rankScoreByNormalizedName);
 
       if (defs && !hasRepeatedTeammates(defs, level.pairs)) {
         return {
@@ -923,6 +1259,71 @@ export default function App() {
       if (!result.defs) {
         throw new Error(
           'No valid team arrangement could satisfy even the final rule of avoiding teammate repeats from the immediately previous week. Change the players-per-team value, add more players, or use Handpick Teams.'
+        );
+      }
+
+      const wrongTeamSize = result.defs.some(
+        (teamDef) => teamDef.players.length !== playersPerTeam
+      );
+
+      if (wrongTeamSize) {
+        throw new Error(
+          `The generator could not create equal teams of ${playersPerTeam}. Please try again.`
+        );
+      }
+
+      if (result.relaxed) {
+        alert(
+          `A full league-history separation was mathematically unavailable. The teams were generated using the next strongest rule: no teammate repeats from ${result.levelUsed}.`
+        );
+      }
+
+      await buildTeamsAndSchedule(result.defs);
+    });
+  }
+
+  async function balancedTeams() {
+    if (!weekId) {
+      return fail('No week is selected. Create or select a week first.');
+    }
+
+    const suggestedPlayersPerTeam =
+      players.length % 3 === 0
+        ? 3
+        : players.length % 2 === 0
+          ? 2
+          : 4;
+
+    const response = prompt(
+      'How many players should be in each team? Enter 2, 3, or 4.',
+      suggestedPlayersPerTeam
+    );
+
+    if (response === null) return;
+
+    const playersPerTeam = Number(String(response).trim());
+    const teamSizeValidation = validatePlayersPerTeam(players.length, playersPerTeam);
+    if (teamSizeValidation) return fail(teamSizeValidation);
+
+    const teamCount = players.length / playersPerTeam;
+    const teamCountValidation = validateTeamAsk(players.length, teamCount);
+    if (teamCountValidation) return fail(teamCountValidation);
+
+    await act(async () => {
+      const [historicalPairs, formStats] = await Promise.all([
+        getHistoricalTeammatePairSets(),
+        getHistoricalFormStats(),
+      ]);
+
+      const rankScoreByNormalizedName = Object.fromEntries(
+        formStats.map((row) => [row.normalizedName, row.rankScore])
+      );
+
+      const result = findSkillBalancedTeamDefsWithAvoidance(teamCount, historicalPairs, rankScoreByNormalizedName);
+
+      if (!result.defs) {
+        throw new Error(
+          'No valid skill-balanced arrangement could satisfy even the final rule of avoiding teammate repeats from the immediately previous week. Change the players-per-team value, add more players, or use Handpick Teams.'
         );
       }
 
@@ -1541,6 +1942,7 @@ export default function App() {
     ['costs', 'Costs', Flame],
     ['team', 'Team Standings', Trophy],
     ['playersStand', 'Player Standings', Star],
+    ['rankings', 'Rankings', TrendingUp],
     ['overall', 'Overall Standings', Flame],
     ['settings', 'Settings', Settings],
   ];
@@ -1626,6 +2028,7 @@ export default function App() {
             <h2>Team Setup</h2>
             <div className="row">
               <button className={mode === 'auto' ? 'btn' : 'btn secondary'} onClick={() => setMode('auto')}>Auto Generate</button>
+              <button className={mode === 'balanced' ? 'btn' : 'btn secondary'} onClick={() => setMode('balanced')}>Balanced Teams</button>
               <button className={mode === 'manual' ? 'btn' : 'btn secondary'} onClick={() => setMode('manual')}>Handpick Teams</button>
             </div>
 
@@ -1633,6 +2036,16 @@ export default function App() {
               <div className="card">
                 <h3>Automatic Team Generator</h3>
                 <button className="btn" onClick={randomTeams}>Generate Teams by Players per Team</button>
+              </div>
+            ) : mode === 'balanced' ? (
+              <div className="card">
+                <h3>Skill-Balanced Team Generator</h3>
+                <p className="muted">
+                  Builds teams so total recent-form Rank Score is spread evenly across teams, while still
+                  avoiding repeat teammates from league history (falling back to the last 2 weeks, then the
+                  immediately previous week, if a full split isn't mathematically possible).
+                </p>
+                <button className="btn" onClick={balancedTeams}>Generate Balanced Teams by Players per Team</button>
               </div>
             ) : (
               <div className="card">
@@ -1897,6 +2310,7 @@ export default function App() {
 
         {tab === 'team' && <Standings rows={teamStandings} type="team" />}
         {tab === 'playersStand' && <Standings rows={playerStandings} type="player" />}
+        {tab === 'rankings' && <RankingsStandings rows={rankingRows} onRefresh={loadLeagueRankings} />}
 
 
         {tab === 'overall' && (
@@ -1997,6 +2411,48 @@ function Standings({ rows, type }) {
           </tbody>
         </table>
       )}
+    </div>
+  );
+}
+
+function RankingsStandings({ rows, onRefresh }) {
+  return (
+    <div className="card">
+      <h2>Rankings</h2>
+      <div className="fireline" />
+      <p className="muted">
+        Rank Score weighs each week's (wins − losses) by how recent it is, so recent form counts
+        more than older results.
+        <button className="btn secondary" onClick={onRefresh} style={{ marginLeft: 8 }}>Refresh</button>
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Rank</th><th>Player</th><th>Streak</th><th>Games</th><th>Wins</th><th>Losses</th>
+            <th>PF</th><th>PA</th><th>Diff</th>
+            <th title="Sum, across weeks the player played, of (wins − losses) for that week × 0.5 raised to the number of that player's own played-weeks since that week.">Rank Score</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((s, i) => (
+            <tr key={s.normalizedName}>
+              <td>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i + 1}</td>
+              <td><b>{s.displayName}</b></td>
+              <td className={s.streak > 0 ? 'streakPos' : s.streak < 0 ? 'streakNeg' : ''}>
+                {s.streak > 0 ? `W${s.streak}` : s.streak < 0 ? `L${Math.abs(s.streak)}` : '–'}
+              </td>
+              <td>{s.gamesPlayed}</td>
+              <td>{s.wins}</td>
+              <td>{s.losses}</td>
+              <td>{s.pointsFor}</td>
+              <td>{s.pointsAgainst}</td>
+              <td className={s.pointDiff >= 0 ? 'diffpos' : 'diffneg'}>{s.pointDiff > 0 ? '+' : ''}{s.pointDiff}</td>
+              <td>{s.rankScore.toFixed(1)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

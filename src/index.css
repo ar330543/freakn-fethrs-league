@@ -160,6 +160,8 @@ th { color: #999; font-size: 12px; text-transform: uppercase; letter-spacing: 1p
 
 .diffpos { color: var(--green); }
 .diffneg { color: #fb7185; }
+.streakPos { color: var(--green); font-weight: 900; }
+.streakNeg { color: #fb7185; font-weight: 900; }
 .fireline { height: 3px; width: 70px; background: linear-gradient(90deg, var(--red), transparent); margin: 8px 0 16px; }
 
 .error { border: 1px solid #ef4444; background: #450a0a; color: #fecaca; border-radius: 12px; padding: 12px; margin-bottom: 12px; }
