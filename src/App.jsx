@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
   Home, Users, Shield, Swords, Trophy, Star, Settings,
-  Flame, Plus, Trash2, RotateCcw, Download, AlertTriangle, TrendingUp
+  Flame, Plus, Trash2, RotateCcw, Download, AlertTriangle, TrendingUp, UserPlus
 } from 'lucide-react';
 
 const supabase = createClient(
@@ -552,12 +552,14 @@ export default function App() {
   const [quickTeam2Id, setQuickTeam2Id] = useState('');
   const [playerGameSearch, setPlayerGameSearch] = useState('');
   const [rankingRows, setRankingRows] = useState([]);
+  const [regularPlayers, setRegularPlayers] = useState([]);
+  const [regularNames, setRegularNames] = useState('');
 
   const league = leagues.find((l) => l.id === leagueId);
   const week = weeks.find((w) => w.id === weekId);
 
   useEffect(() => { boot(); }, []);
-  useEffect(() => { if (leagueId) { loadWeeks(true); loadOverallLeaderboard(); } }, [leagueId]);
+  useEffect(() => { if (leagueId) { loadWeeks(true); loadOverallLeaderboard(); loadRegularPlayers(); } }, [leagueId]);
   useEffect(() => { if (weekId) { loadWeekData(); loadWeekCost(); } else clearWeekData(); }, [weekId]);
   useEffect(() => {
     if (tab === 'rankings' && leagueId) loadLeagueRankings();
@@ -597,6 +599,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'game_scores' }, () => loadWeekData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'week_costs' }, () => loadWeekCost())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'overall_leaderboards' }, () => loadOverallLeaderboard())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'regular_players' }, () => loadRegularPlayers())
       .subscribe();
 
     return () => supabase.removeChannel(channel);
@@ -779,6 +782,22 @@ export default function App() {
     }
   }
 
+  async function loadRegularPlayers() {
+    if (!leagueId) {
+      setRegularPlayers([]);
+      return;
+    }
+
+    const { data, error: err } = await supabase
+      .from('regular_players')
+      .select('*')
+      .eq('league_id', leagueId)
+      .order('name');
+
+    if (err) return fail(err.message);
+    setRegularPlayers(data || []);
+  }
+
   async function loadWeekData() {
     if (!weekId) {
       clearWeekData();
@@ -870,6 +889,51 @@ export default function App() {
     if (!confirm(`Remove ${player.name}? This may remove related team/game rows.`)) return;
     await act(async () => {
       const { error: err } = await supabase.from('players').delete().eq('id', player.id);
+      if (err) throw err;
+    });
+  }
+
+  async function addRegularPlayers() {
+    if (!leagueId) return fail('No league is selected.');
+    const arr = regularNames.split('\n').map((x) => x.trim()).filter(Boolean);
+    if (!arr.length) return fail('Paste at least one player name.');
+
+    await act(async () => {
+      const { error: err } = await supabase
+        .from('regular_players')
+        .upsert(arr.map((name) => ({ league_id: leagueId, name })), { onConflict: 'league_id,name' });
+      if (err) throw err;
+      setRegularNames('');
+    });
+  }
+
+  async function removeRegularPlayer(regular) {
+    if (!confirm(`Remove ${regular.name} from the roster? This does not affect any week's player list.`)) return;
+    await act(async () => {
+      const { error: err } = await supabase.from('regular_players').delete().eq('id', regular.id);
+      if (err) throw err;
+    });
+  }
+
+  async function addPlayerFromRoster(name) {
+    if (!weekId) return fail('No week is selected. Create or select a week before adding players.');
+
+    await act(async () => {
+      const { error: err } = await supabase
+        .from('players')
+        .upsert([{ week_id: weekId, name }], { onConflict: 'week_id,name' });
+      if (err) throw err;
+    });
+  }
+
+  async function addAllRegularsToWeek() {
+    if (!weekId) return fail('No week is selected. Create or select a week before adding players.');
+    if (!regularPlayers.length) return fail('The roster is empty. Add regulars in the Roster tab first.');
+
+    await act(async () => {
+      const { error: err } = await supabase
+        .from('players')
+        .upsert(regularPlayers.map((r) => ({ week_id: weekId, name: r.name })), { onConflict: 'week_id,name' });
       if (err) throw err;
     });
   }
@@ -1937,6 +2001,7 @@ export default function App() {
   const nav = [
     ['dashboard', 'Dashboard', Home],
     ['players', 'Players', Users],
+    ['roster', 'Roster', UserPlus],
     ['teams', 'Teams', Shield],
     ['matches', 'Matches', Swords],
     ['costs', 'Costs', Flame],
@@ -2007,6 +2072,31 @@ export default function App() {
         {tab === 'players' && (
           <div className="card">
             <h2>Players</h2>
+
+            {!!regularPlayers.length && (
+              <div className="card">
+                <h3>Quick Add from Roster</h3>
+                <button className="btn secondary" onClick={addAllRegularsToWeek}>Add All</button>
+                <div className="row" style={{ flexWrap: 'wrap', marginTop: 8 }}>
+                  {regularPlayers.map((r) => {
+                    const alreadyAdded = players.some(
+                      (p) => normalizePlayerName(p.name) === normalizePlayerName(r.name)
+                    );
+                    return (
+                      <button
+                        key={r.id}
+                        className="btn secondary"
+                        disabled={alreadyAdded}
+                        onClick={() => addPlayerFromRoster(r.name)}
+                      >
+                        {alreadyAdded ? `✓ ${r.name}` : r.name}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             <textarea value={names} onChange={(e) => setNames(e.target.value)} placeholder="Paste names, one per line" />
             <button className="btn" onClick={addPlayers}>Add / Import Players</button>
 
@@ -2016,6 +2106,29 @@ export default function App() {
                   <tr key={p.id}>
                     <td>{p.name}</td>
                     <td style={{ width: 120 }}><button className="btn danger" onClick={() => removePlayer(p)}><Trash2 size={16} /></button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {tab === 'roster' && (
+          <div className="card">
+            <h2>Roster</h2>
+            <p className="muted">
+              Regulars are per-league and separate from any week's player list — removing someone
+              here won't remove them from past or current weeks.
+            </p>
+            <textarea value={regularNames} onChange={(e) => setRegularNames(e.target.value)} placeholder="Paste regular player names, one per line" />
+            <button className="btn" onClick={addRegularPlayers}>Add / Import Regulars</button>
+
+            <table>
+              <tbody>
+                {regularPlayers.map((r) => (
+                  <tr key={r.id}>
+                    <td>{r.name}</td>
+                    <td style={{ width: 120 }}><button className="btn danger" onClick={() => removeRegularPlayer(r)}><Trash2 size={16} /></button></td>
                   </tr>
                 ))}
               </tbody>
@@ -2396,7 +2509,7 @@ function Standings({ rows, type }) {
           </thead>
           <tbody>
             {rows.map((s, i) => (
-              <tr key={s.id}>
+              <tr key={s.id ?? s.player}>
                 <td>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i + 1}</td>
                 <td><b>{s.player}</b></td>
                 <td>{s.played}</td>

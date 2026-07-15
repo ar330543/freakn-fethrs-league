@@ -195,3 +195,21 @@ drop policy if exists "public all week_costs" on week_costs;
 create policy "public all week_costs" on week_costs for all using (true) with check (true);
 
 do $$ begin alter publication supabase_realtime add table week_costs; exception when duplicate_object then null; end $$;
+
+
+
+-- V19 non-destructive regular players roster
+create table if not exists regular_players (
+  id uuid primary key default gen_random_uuid(),
+  league_id uuid references leagues(id) on delete cascade not null,
+  name text not null,
+  created_at timestamptz default now(),
+  unique(league_id, name)
+);
+
+alter table regular_players enable row level security;
+
+drop policy if exists "public all regular_players" on regular_players;
+create policy "public all regular_players" on regular_players for all using (true) with check (true);
+
+do $$ begin alter publication supabase_realtime add table regular_players; exception when duplicate_object then null; end $$;

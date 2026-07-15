@@ -129,6 +129,7 @@ textarea { min-height: 120px; }
 .btn.secondary { background: #202020; border: 1px solid #383838; }
 .btn.danger { background: #961b1b; }
 .btn.green { background: #166534; }
+.btn:disabled { opacity: 0.4; cursor: default; }
 
 table { width: 100%; border-collapse: collapse; }
 th, td { padding: 11px 9px; border-bottom: 1px solid #242424; text-align: left; }
