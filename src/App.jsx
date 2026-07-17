@@ -2799,6 +2799,7 @@ function PlayerDashboardModal({ row, rank, onClose }) {
               <div className="card stat"><div><span className="muted">Rank Score</span><b>{row.rankScore.toFixed(1)}</b></div></div>
               <div className="card stat"><div><span className="muted">Streak</span><b className={row.streak > 0 ? 'streakPos' : row.streak < 0 ? 'streakNeg' : ''}>{row.streak > 0 ? `W${row.streak}` : row.streak < 0 ? `L${Math.abs(row.streak)}` : '–'}</b></div></div>
               <div className="card stat"><div><span className="muted">Games</span><b>{row.gamesPlayed}</b></div></div>
+              <div className="card stat"><div><span className="muted">Overall Win %</span><b>{(row.wins + row.losses) ? Math.round((row.wins / (row.wins + row.losses)) * 100) : 0}%</b></div></div>
             </div>
 
             <h3>Win % by Week</h3>
