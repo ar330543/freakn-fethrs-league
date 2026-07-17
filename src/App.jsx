@@ -1082,6 +1082,7 @@ export default function App() {
       const { data: newWeekRow, error: err } = await supabase.from('weeks').insert({ league_id: leagueId, name }).select().single();
       if (err) throw err;
       setWeekId(newWeekRow.id);
+      setTab('teams');
     });
   }
 
@@ -2329,6 +2330,7 @@ export default function App() {
             </select>
 
             <button className="btn" onClick={newWeek}><Plus size={16} /> Week</button>
+            <button className="btn secondary" disabled={!weekId} onClick={() => setTab('teams')}><Plus size={16} /> Set</button>
           </div>
         </div>
 
