@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { createClient } from '@supabase/supabase-js';
 import {
   Home, Users, Shield, Swords, Trophy, Star, Settings,
-  Flame, Plus, Trash2, RotateCcw, Download, AlertTriangle, TrendingUp, UserPlus
+  Flame, Plus, Trash2, RotateCcw, Download, AlertTriangle, TrendingUp, UserPlus, Sparkles
 } from 'lucide-react';
 
 const supabase = createClient(
@@ -304,7 +304,7 @@ function computeStreak(orderedResultsForPlayer) {
 
 const FORM_RECENCY_DECAY = 0.5;
 
-function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows) {
+function buildLeagueGameContext(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows) {
   const weekOrder = [...weeksInScope].sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
   const weekIndex = Object.fromEntries(weekOrder.map((w, i) => [w.id, i]));
 
@@ -333,6 +333,29 @@ function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRow
       String(a.match.court).localeCompare(String(b.match.court)) ||
       Number(a.game.game_number) - Number(b.game.game_number)
     );
+
+  return { weekOrder, weekIndex, orderableGames, normalizedNameById, displayNameByNormalized };
+}
+
+function computeBestEverStreak(orderedResultsForPlayer) {
+  let best = 0;
+  let current = 0;
+
+  orderedResultsForPlayer.forEach((r) => {
+    if (r.won === true) {
+      current += 1;
+      best = Math.max(best, current);
+    } else if (r.won === false) {
+      current = 0;
+    }
+  });
+
+  return best;
+}
+
+function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows) {
+  const { weekOrder, orderableGames, normalizedNameById, displayNameByNormalized } =
+    buildLeagueGameContext(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows);
 
   const byPlayer = {};
 
@@ -374,6 +397,7 @@ function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRow
 
   return Object.entries(byPlayer).map(([normalizedName, p]) => {
     const streak = computeStreak(p.orderedResults);
+    const bestStreak = computeBestEverStreak(p.orderedResults);
     const gamesPlayed = p.orderedResults.length;
     const wins = p.orderedResults.filter((r) => r.won === true).length;
     const losses = p.orderedResults.filter((r) => r.won === false).length;
@@ -410,6 +434,8 @@ function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRow
       normalizedName,
       displayName: displayNameByNormalized[normalizedName] || normalizedName,
       streak,
+      bestStreak,
+      weeksPlayed: playedWeekIdxs.length,
       gamesPlayed,
       wins,
       losses,
@@ -426,6 +452,117 @@ function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRow
     b.gamesPlayed - a.gamesPlayed ||
     a.displayName.localeCompare(b.displayName)
   );
+}
+
+const MIN_DUO_GAMES = 3;
+
+function computeFunStats(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows) {
+  const playerStats = computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows);
+  const { weekOrder, orderableGames, normalizedNameById, displayNameByNormalized } =
+    buildLeagueGameContext(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows);
+
+  const hotStreaks = playerStats
+    .filter((p) => p.streak > 0)
+    .sort((a, b) => b.streak - a.streak)
+    .slice(0, 5)
+    .map((p) => ({ name: p.displayName, value: p.streak }));
+
+  const bestEverStreaks = playerStats
+    .filter((p) => p.bestStreak > 0)
+    .sort((a, b) => b.bestStreak - a.bestStreak)
+    .slice(0, 5)
+    .map((p) => ({ name: p.displayName, value: p.bestStreak }));
+
+  const mostActive = [...playerStats]
+    .filter((p) => p.gamesPlayed > 0)
+    .sort((a, b) => b.gamesPlayed - a.gamesPlayed)
+    .slice(0, 5)
+    .map((p) => ({ name: p.displayName, value: p.gamesPlayed }));
+
+  const mostLoyal = [...playerStats]
+    .filter((p) => p.weeksPlayed > 0)
+    .sort((a, b) => b.weeksPlayed - a.weeksPlayed)
+    .slice(0, 5)
+    .map((p) => ({ name: p.displayName, value: p.weeksPlayed }));
+
+  const mostImproved = playerStats
+    .map((p) => {
+      const wk = p.perWeekBreakdown;
+      if (wk.length < 2) return null;
+      const current = wk[wk.length - 1];
+      const previous = wk[wk.length - 2];
+      return {
+        name: p.displayName,
+        delta: current.winPct - previous.winPct,
+        currentWeekName: current.weekName,
+        currentWinPct: current.winPct,
+        previousWeekName: previous.weekName,
+        previousWinPct: previous.winPct,
+      };
+    })
+    .filter((x) => x && x.delta > 0)
+    .sort((a, b) => b.delta - a.delta)
+    .slice(0, 5);
+
+  const pairStats = {};
+  orderableGames.forEach(({ game, score1, score2 }) => {
+    const won1 = score1 > score2 ? true : score2 > score1 ? false : null;
+    const teams = [
+      { ids: [game.t1_player1_id, game.t1_player2_id], won: won1 },
+      { ids: [game.t2_player1_id, game.t2_player2_id], won: won1 === null ? null : !won1 },
+    ];
+
+    teams.forEach(({ ids, won }) => {
+      const names = ids.map((id) => normalizedNameById[id]).filter(Boolean);
+      if (names.length < 2) return;
+      const key = [...names].sort().join('|');
+      if (!pairStats[key]) pairStats[key] = { names: [...names].sort(), wins: 0, losses: 0 };
+      if (won === true) pairStats[key].wins++;
+      else if (won === false) pairStats[key].losses++;
+    });
+  });
+
+  const bestDuo = Object.values(pairStats)
+    .map((p) => {
+      const played = p.wins + p.losses;
+      return {
+        names: p.names.map((n) => displayNameByNormalized[n] || n),
+        wins: p.wins,
+        losses: p.losses,
+        played,
+        winPct: played ? Math.round((p.wins / played) * 100) : 0,
+      };
+    })
+    .filter((p) => p.played >= MIN_DUO_GAMES)
+    .sort((a, b) => b.winPct - a.winPct || b.played - a.played)
+    .slice(0, 5);
+
+  let biggestBlowout = null;
+  let closestMatch = null;
+
+  orderableGames.forEach(({ game, weekIdx, score1, score2 }) => {
+    const margin = Math.abs(score1 - score2);
+    if (margin === 0) return;
+
+    const t1Names = [game.t1_player1_id, game.t1_player2_id].map((id) => displayNameByNormalized[normalizedNameById[id]] || '-');
+    const t2Names = [game.t2_player1_id, game.t2_player2_id].map((id) => displayNameByNormalized[normalizedNameById[id]] || '-');
+    const winnerNames = score1 > score2 ? t1Names : t2Names;
+    const loserNames = score1 > score2 ? t2Names : t1Names;
+
+    const entry = {
+      margin,
+      weekName: weekOrder[weekIdx]?.name || `Week ${weekIdx + 1}`,
+      winnerNames,
+      loserNames,
+      winnerScore: Math.max(score1, score2),
+      loserScore: Math.min(score1, score2),
+    };
+
+    if (!biggestBlowout || margin > biggestBlowout.margin) biggestBlowout = entry;
+    if (!closestMatch || margin < closestMatch.margin) closestMatch = entry;
+  });
+
+  return { hotStreaks, bestEverStreaks, mostActive, mostLoyal, mostImproved, bestDuo, biggestBlowout, closestMatch };
 }
 
 async function fetchFormRawData(weekIds) {
@@ -643,20 +780,57 @@ export default function App() {
   const [weekCost, setWeekCost] = useState(null);
   const [overallRows, setOverallRows] = useState([]);
   const [overallCalculatedAt, setOverallCalculatedAt] = useState(null);
+  const [overallScope, setOverallScope] = useState('league');
+  const [allLeaguesOverallRows, setAllLeaguesOverallRows] = useState([]);
   const [quickTeam1Id, setQuickTeam1Id] = useState('');
   const [quickTeam2Id, setQuickTeam2Id] = useState('');
   const [playerGameSearch, setPlayerGameSearch] = useState('');
   const [rankingRows, setRankingRows] = useState([]);
+  const [funStats, setFunStats] = useState(null);
   const [regularPlayers, setRegularPlayers] = useState([]);
   const [regularNames, setRegularNames] = useState('');
   const [selectedPlayerName, setSelectedPlayerName] = useState(null);
   const [clubNameDraft, setClubNameDraft] = useState('');
   const [opponentNames, setOpponentNames] = useState('');
+  const [interClubMode, setInterClubMode] = useState('auto');
+  const [manualCourts, setManualCourts] = useState([]);
 
   const league = leagues.find((l) => l.id === leagueId);
   const week = weeks.find((w) => w.id === weekId);
+  const ourPlayerCount = players.filter((p) => !p.is_opponent).length;
+  const [copySourceWeek, setCopySourceWeek] = useState(null);
 
   useEffect(() => { setClubNameDraft(week?.club_name || ''); }, [weekId, week?.club_name]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function findMostRecentWeekWithPlayers() {
+      const candidates = weeks.filter((w) => w.id !== weekId);
+      if (!candidates.length) {
+        setCopySourceWeek(null);
+        return;
+      }
+
+      const { data } = await supabase
+        .from('players')
+        .select('week_id')
+        .in('week_id', candidates.map((w) => w.id))
+        .eq('is_opponent', false);
+
+      if (cancelled) return;
+      const weekIdsWithPlayers = new Set((data || []).map((p) => p.week_id));
+      setCopySourceWeek(candidates.find((w) => weekIdsWithPlayers.has(w.id)) || null);
+    }
+
+    if (weekId && ourPlayerCount === 0 && weeks.length > 1) {
+      findMostRecentWeekWithPlayers();
+    } else {
+      setCopySourceWeek(null);
+    }
+
+    return () => { cancelled = true; };
+  }, [weekId, ourPlayerCount, weeks]);
 
   useEffect(() => { boot(); }, []);
   useEffect(() => { if (leagueId) { loadWeeks(true); loadOverallLeaderboard(); loadRegularPlayers(); } }, [leagueId]);
@@ -664,6 +838,12 @@ export default function App() {
   useEffect(() => {
     if (tab === 'rankings' && leagueId) loadLeagueRankings();
   }, [tab, leagueId, weeks, players, games, scores]);
+  useEffect(() => {
+    if (tab === 'funstats' && leagueId) loadFunStats();
+  }, [tab, leagueId, weeks, players, games, scores]);
+  useEffect(() => {
+    if (tab === 'overall' && overallScope === 'all') loadAllLeaguesOverall();
+  }, [tab, overallScope]);
 
   useEffect(() => {
     setQuickTeam1Id('');
@@ -1047,6 +1227,22 @@ export default function App() {
     });
   }
 
+  async function copyPlayersFromWeek(sourceWeekId, sourceWeekName) {
+    if (!weekId) return fail('No week is selected.');
+
+    await act(async () => {
+      const { data: sourcePlayers, error: fetchErr } = await supabase
+        .from('players').select('name').eq('week_id', sourceWeekId).eq('is_opponent', false);
+      if (fetchErr) throw fetchErr;
+      if (!sourcePlayers?.length) throw new Error(`"${sourceWeekName}" has no players to copy.`);
+
+      const { error: err } = await supabase
+        .from('players')
+        .upsert(sourcePlayers.map((p) => ({ week_id: weekId, name: p.name })), { onConflict: 'week_id,name' });
+      if (err) throw err;
+    });
+  }
+
   async function addAllRegularsToWeek() {
     if (!weekId) return fail('No week is selected. Create or select a week before adding players.');
     if (!regularPlayers.length) return fail('The roster is empty. Add regulars in the Roster tab first.');
@@ -1247,6 +1443,58 @@ export default function App() {
     if (gErr) throw gErr;
   }
 
+  async function commitInterClubCourts(courtPairs) {
+    const clubName = week?.club_name?.trim();
+    const ourPlayers = players.filter((p) => !p.is_opponent);
+    const opponentPlayers = players.filter((p) => p.is_opponent);
+
+    const { targetSetNumber, mode } = await resolveTargetSet(weekId);
+    if (mode === 'replace') {
+      await deleteSetRows(weekId, targetSetNumber);
+    }
+
+    const { data: insertedTeams, error: tErr } = await supabase
+      .from('teams')
+      .insert([
+        { week_id: weekId, set_number: targetSetNumber, name: 'Home', emoji: '🏠', color: '#ff3b00' },
+        { week_id: weekId, set_number: targetSetNumber, name: clubName, emoji: '🏸', color: '#38bdf8' },
+      ])
+      .select();
+    if (tErr) throw tErr;
+
+    const [homeTeam, clubTeam] = insertedTeams;
+
+    const links = [
+      ...ourPlayers.map((p) => ({ team_id: homeTeam.id, player_id: p.id })),
+      ...opponentPlayers.map((p) => ({ team_id: clubTeam.id, player_id: p.id })),
+    ];
+    const { error: linkErr } = await supabase.from('team_players').insert(links);
+    if (linkErr) throw linkErr;
+
+    const matchRows = courtPairs.map((_, i) => ({
+      week_id: weekId,
+      set_number: targetSetNumber,
+      slot: 1,
+      court: String.fromCharCode(65 + i),
+      team1_id: homeTeam.id,
+      team2_id: clubTeam.id,
+    }));
+    const { data: insertedMatches, error: mErr } = await supabase.from('matches').insert(matchRows).select();
+    if (mErr) throw mErr;
+
+    const sortedMatches = [...insertedMatches].sort((a, b) => a.court.localeCompare(b.court));
+    const gameRows = sortedMatches.map((match, i) => ({
+      match_id: match.id,
+      game_number: 1,
+      t1_player1_id: courtPairs[i].ourPair[0],
+      t1_player2_id: courtPairs[i].ourPair[1],
+      t2_player1_id: courtPairs[i].oppPair[0],
+      t2_player2_id: courtPairs[i].oppPair[1],
+    }));
+    const { error: gErr } = await supabase.from('match_games').insert(gameRows);
+    if (gErr) throw gErr;
+  }
+
   async function buildInterClubRound() {
     if (!weekId) return fail('No week is selected.');
     const clubName = week?.club_name?.trim();
@@ -1260,53 +1508,61 @@ export default function App() {
     const ourPairs = chunkIntoPairs(shuffleArray(ourPlayers));
     const opponentPairs = chunkIntoPairs(shuffleArray(opponentPlayers));
     const numCourts = Math.min(ourPairs.length, opponentPairs.length);
+    const courtPairs = Array.from({ length: numCourts }, (_, i) => ({
+      ourPair: [ourPairs[i][0].id, ourPairs[i][1].id],
+      oppPair: [opponentPairs[i][0].id, opponentPairs[i][1].id],
+    }));
 
     await act(async () => {
-      const { targetSetNumber, mode } = await resolveTargetSet(weekId);
-      if (mode === 'replace') {
-        await deleteSetRows(weekId, targetSetNumber);
+      await commitInterClubCourts(courtPairs);
+    });
+  }
+
+  function addManualCourt() {
+    setManualCourts((current) => [...current, { ourPlayer1: '', ourPlayer2: '', oppPlayer1: '', oppPlayer2: '' }]);
+  }
+
+  function removeManualCourt(index) {
+    setManualCourts((current) => current.filter((_, i) => i !== index));
+  }
+
+  function setManualCourtPlayer(index, field, playerId) {
+    setManualCourts((current) => current.map((c, i) => (i === index ? { ...c, [field]: playerId } : c)));
+  }
+
+  function availableManualPlayers(pool, index, field) {
+    const currentValue = manualCourts[index]?.[field];
+    const otherField = field.endsWith('1') ? field.replace('1', '2') : field.replace('2', '1');
+    const used = new Set();
+
+    manualCourts.forEach((c, i) => {
+      if (i === index) {
+        if (c[otherField]) used.add(c[otherField]);
+        return;
       }
+      if (c[field.startsWith('our') ? 'ourPlayer1' : 'oppPlayer1']) used.add(c[field.startsWith('our') ? 'ourPlayer1' : 'oppPlayer1']);
+      if (c[field.startsWith('our') ? 'ourPlayer2' : 'oppPlayer2']) used.add(c[field.startsWith('our') ? 'ourPlayer2' : 'oppPlayer2']);
+    });
 
-      const { data: insertedTeams, error: tErr } = await supabase
-        .from('teams')
-        .insert([
-          { week_id: weekId, set_number: targetSetNumber, name: 'Home', emoji: '🏠', color: '#ff3b00' },
-          { week_id: weekId, set_number: targetSetNumber, name: clubName, emoji: '🏸', color: '#38bdf8' },
-        ])
-        .select();
-      if (tErr) throw tErr;
+    return pool.filter((p) => p.id === currentValue || !used.has(p.id));
+  }
 
-      const [homeTeam, clubTeam] = insertedTeams;
+  async function saveManualInterClubCourts() {
+    if (!weekId) return fail('No week is selected.');
+    if (!week?.club_name?.trim()) return fail("Enter and save the visiting club's name first.");
+    if (!manualCourts.length) return fail('Add at least one court.');
 
-      const links = [
-        ...ourPlayers.map((p) => ({ team_id: homeTeam.id, player_id: p.id })),
-        ...opponentPlayers.map((p) => ({ team_id: clubTeam.id, player_id: p.id })),
-      ];
-      const { error: linkErr } = await supabase.from('team_players').insert(links);
-      if (linkErr) throw linkErr;
+    const incomplete = manualCourts.some((c) => !c.ourPlayer1 || !c.ourPlayer2 || !c.oppPlayer1 || !c.oppPlayer2);
+    if (incomplete) return fail('Fill in all 4 players for every court before saving.');
 
-      const matchRows = Array.from({ length: numCourts }, (_, i) => ({
-        week_id: weekId,
-        set_number: targetSetNumber,
-        slot: 1,
-        court: String.fromCharCode(65 + i),
-        team1_id: homeTeam.id,
-        team2_id: clubTeam.id,
-      }));
-      const { data: insertedMatches, error: mErr } = await supabase.from('matches').insert(matchRows).select();
-      if (mErr) throw mErr;
+    const courtPairs = manualCourts.map((c) => ({
+      ourPair: [c.ourPlayer1, c.ourPlayer2],
+      oppPair: [c.oppPlayer1, c.oppPlayer2],
+    }));
 
-      const sortedMatches = [...insertedMatches].sort((a, b) => a.court.localeCompare(b.court));
-      const gameRows = sortedMatches.map((match, i) => ({
-        match_id: match.id,
-        game_number: 1,
-        t1_player1_id: ourPairs[i][0].id,
-        t1_player2_id: ourPairs[i][1].id,
-        t2_player1_id: opponentPairs[i][0].id,
-        t2_player2_id: opponentPairs[i][1].id,
-      }));
-      const { error: gErr } = await supabase.from('match_games').insert(gameRows);
-      if (gErr) throw gErr;
+    await act(async () => {
+      await commitInterClubCourts(courtPairs);
+      setManualCourts([]);
     });
   }
 
@@ -1474,6 +1730,22 @@ export default function App() {
 
     const raw = await fetchFormRawData(leagueWeeks.map((item) => item.id));
     setRankingRows(computeLeagueFormStats(leagueWeeks, raw.playersRows, raw.matchesRows, raw.gamesRows, raw.scoresRows));
+  }
+
+  async function loadFunStats() {
+    if (!leagueId) {
+      setFunStats(null);
+      return;
+    }
+
+    const leagueWeeks = await fetchLeagueWeeks({ excludeInterClub: true });
+    if (!leagueWeeks.length) {
+      setFunStats(null);
+      return;
+    }
+
+    const raw = await fetchFormRawData(leagueWeeks.map((item) => item.id));
+    setFunStats(computeFunStats(leagueWeeks, raw.playersRows, raw.matchesRows, raw.gamesRows, raw.scoresRows));
   }
 
   async function openPlayerDashboard(rawName) {
@@ -1902,6 +2174,76 @@ export default function App() {
       );
   }
 
+  async function computeOverallStatsForWeeks(weekIds) {
+    if (!weekIds.length) return [];
+
+    const [pRes, mRes] = await Promise.all([
+      supabase.from('players').select('*').in('week_id', weekIds),
+      supabase.from('matches').select('*').in('week_id', weekIds),
+    ]);
+    if (pRes.error) throw pRes.error;
+    if (mRes.error) throw mRes.error;
+
+    const allPlayers = pRes.data || [];
+    const allMatches = mRes.data || [];
+    const matchIds = allMatches.map((m) => m.id);
+    const playerById = Object.fromEntries(allPlayers.map((p) => [p.id, p]));
+
+    if (!matchIds.length) return [];
+
+    const { data: allGames, error: gErr } = await supabase
+      .from('match_games')
+      .select('*')
+      .in('match_id', matchIds);
+    if (gErr) throw gErr;
+
+    const gameIds = (allGames || []).map((g) => g.id);
+    const { data: allScores, error: sErr } = gameIds.length
+      ? await supabase.from('game_scores').select('*').in('game_id', gameIds)
+      : { data: [], error: null };
+    if (sErr) throw sErr;
+
+    const scoreByGame = Object.fromEntries((allScores || []).map((s) => [s.game_id, s]));
+    const stats = {};
+
+    function ensure(name) {
+      if (!stats[name]) stats[name] = { player: name, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0 };
+      return stats[name];
+    }
+
+    (allGames || []).forEach((game) => {
+      const score = scoreByGame[game.id];
+      if (!score || score.score1 == null || score.score2 == null) return;
+
+      const s1 = Number(score.score1);
+      const s2 = Number(score.score2);
+
+      [game.t1_player1_id, game.t1_player2_id].forEach((id) => {
+        const player = playerById[id];
+        if (!player) return;
+        const row = ensure(player.name);
+        row.played++;
+        row.pointsFor += s1;
+        row.pointsAgainst += s2;
+        if (s1 > s2) row.wins++;
+        else if (s2 > s1) row.losses++;
+      });
+
+      [game.t2_player1_id, game.t2_player2_id].forEach((id) => {
+        const player = playerById[id];
+        if (!player) return;
+        const row = ensure(player.name);
+        row.played++;
+        row.pointsFor += s2;
+        row.pointsAgainst += s1;
+        if (s2 > s1) row.wins++;
+        else if (s1 > s2) row.losses++;
+      });
+    });
+
+    return rankOverall(Object.values(stats));
+  }
+
   async function calculateOverallLeaderboard() {
     if (!leagueId) return fail('No league is selected.');
 
@@ -1916,19 +2258,9 @@ export default function App() {
       const weekIds = (leagueWeeks || []).map((w) => w.id);
       if (!weekIds.length) return fail('This league has no weeks to calculate.');
 
-      const [pRes, mRes] = await Promise.all([
-        supabase.from('players').select('*').in('week_id', weekIds),
-        supabase.from('matches').select('*').in('week_id', weekIds),
-      ]);
-      if (pRes.error) throw pRes.error;
-      if (mRes.error) throw mRes.error;
+      const ranked = await computeOverallStatsForWeeks(weekIds);
 
-      const allPlayers = pRes.data || [];
-      const allMatches = mRes.data || [];
-      const matchIds = allMatches.map((m) => m.id);
-      const playerById = Object.fromEntries(allPlayers.map((p) => [p.id, p]));
-
-      if (!matchIds.length) {
+      if (!ranked.length) {
         await supabase.from('overall_leaderboards').upsert({
           league_id: leagueId,
           data: [],
@@ -1937,58 +2269,6 @@ export default function App() {
         setOverallRows([]);
         return;
       }
-
-      const { data: allGames, error: gErr } = await supabase
-        .from('match_games')
-        .select('*')
-        .in('match_id', matchIds);
-      if (gErr) throw gErr;
-
-      const gameIds = (allGames || []).map((g) => g.id);
-      const { data: allScores, error: sErr } = gameIds.length
-        ? await supabase.from('game_scores').select('*').in('game_id', gameIds)
-        : { data: [], error: null };
-      if (sErr) throw sErr;
-
-      const scoreByGame = Object.fromEntries((allScores || []).map((s) => [s.game_id, s]));
-      const stats = {};
-
-      function ensure(name) {
-        if (!stats[name]) stats[name] = { player: name, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0 };
-        return stats[name];
-      }
-
-      (allGames || []).forEach((game) => {
-        const score = scoreByGame[game.id];
-        if (!score || score.score1 == null || score.score2 == null) return;
-
-        const s1 = Number(score.score1);
-        const s2 = Number(score.score2);
-
-        [game.t1_player1_id, game.t1_player2_id].forEach((id) => {
-          const player = playerById[id];
-          if (!player) return;
-          const row = ensure(player.name);
-          row.played++;
-          row.pointsFor += s1;
-          row.pointsAgainst += s2;
-          if (s1 > s2) row.wins++;
-          else if (s2 > s1) row.losses++;
-        });
-
-        [game.t2_player1_id, game.t2_player2_id].forEach((id) => {
-          const player = playerById[id];
-          if (!player) return;
-          const row = ensure(player.name);
-          row.played++;
-          row.pointsFor += s2;
-          row.pointsAgainst += s1;
-          if (s2 > s1) row.wins++;
-          else if (s1 > s2) row.losses++;
-        });
-      });
-
-      const ranked = rankOverall(Object.values(stats));
 
       if ((overallRows || []).length) {
         await supabase.from('overall_leaderboard_history').insert({ league_id: leagueId, data: overallRows });
@@ -2005,6 +2285,15 @@ export default function App() {
       setOverallRows(ranked);
       setOverallCalculatedAt(calculatedAt);
     });
+  }
+
+  async function loadAllLeaguesOverall() {
+    const { data: allWeeks, error: wErr } = await supabase
+      .from('weeks').select('id,name').neq('format', 'inter_club');
+    if (wErr) return fail(wErr.message);
+
+    const weekIds = (allWeeks || []).map((w) => w.id);
+    setAllLeaguesOverallRows(await computeOverallStatsForWeeks(weekIds));
   }
 
   async function clearOverallLeaderboard() {
@@ -2285,6 +2574,7 @@ export default function App() {
     ['playersStand', 'Player Standings', Star],
     ['rankings', 'Rankings', TrendingUp],
     ['overall', 'Overall Standings', Flame],
+    ['funstats', 'Fun Stats', Sparkles],
     ['settings', 'Settings', Settings],
   ];
 
@@ -2333,6 +2623,27 @@ export default function App() {
             <button className="btn secondary" disabled={!weekId} onClick={() => setTab('teams')}><Plus size={16} /> Set</button>
           </div>
         </div>
+
+        {weekId && ourPlayerCount === 0 && (
+          <div className="card" style={{ borderColor: 'var(--orange)' }}>
+            <b>⚠ This week has no players yet.</b>
+            <p className="muted">
+              {copySourceWeek
+                ? `Add players from the Players tab, or reuse the roster from "${copySourceWeek.name}".`
+                : 'Add players from the Players tab before setting up teams.'}
+            </p>
+            <div className="row">
+              {tab !== 'players' && (
+                <button className="btn secondary" onClick={() => setTab('players')}>Go to Players</button>
+              )}
+              {copySourceWeek && (
+                <button className="btn" onClick={() => copyPlayersFromWeek(copySourceWeek.id, copySourceWeek.name)}>
+                  Copy Players from "{copySourceWeek.name}"
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {tab === 'dashboard' && (
           <>
@@ -2483,12 +2794,67 @@ export default function App() {
 
                 <h3>Courts</h3>
                 <p className="muted">
-                  Randomly pairs our available players and {week?.club_name?.trim() || 'the club'}'s available
-                  players into doubles, one court per pair, so multiple matches can run at the same time.
                   Re-running while the current set is unscored replaces it; once a set has scores, this starts
                   a new set instead.
                 </p>
-                <button className="btn" onClick={buildInterClubRound} disabled={!week?.club_name?.trim()}>Generate Courts</button>
+                <div className="row">
+                  <button className={interClubMode === 'auto' ? 'btn' : 'btn secondary'} onClick={() => setInterClubMode('auto')}>Auto Generate</button>
+                  <button className={interClubMode === 'manual' ? 'btn' : 'btn secondary'} onClick={() => setInterClubMode('manual')}>Manual Setup</button>
+                </div>
+
+                {interClubMode === 'auto' ? (
+                  <div className="card">
+                    <p className="muted">
+                      Randomly pairs our available players and {week?.club_name?.trim() || 'the club'}'s available
+                      players into doubles, one court per pair, so multiple matches can run at the same time.
+                    </p>
+                    <button className="btn" onClick={buildInterClubRound} disabled={!week?.club_name?.trim()}>Generate Courts</button>
+                  </div>
+                ) : (
+                  <div className="card">
+                    <p className="muted">
+                      Add a row per court and pick exactly who plays each match. A player already assigned to
+                      one court won't show up as an option for another court in this set.
+                    </p>
+
+                    {manualCourts.map((c, i) => (
+                      <div className="row" key={i} style={{ alignItems: 'center' }}>
+                        <b style={{ minWidth: 60 }}>Court {String.fromCharCode(65 + i)}</b>
+                        <select value={c.ourPlayer1} onChange={(e) => setManualCourtPlayer(i, 'ourPlayer1', e.target.value)}>
+                          <option value="">Our Player 1</option>
+                          {availableManualPlayers(players.filter((p) => !p.is_opponent), i, 'ourPlayer1').map((p) => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                          ))}
+                        </select>
+                        <select value={c.ourPlayer2} onChange={(e) => setManualCourtPlayer(i, 'ourPlayer2', e.target.value)}>
+                          <option value="">Our Player 2</option>
+                          {availableManualPlayers(players.filter((p) => !p.is_opponent), i, 'ourPlayer2').map((p) => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                          ))}
+                        </select>
+                        <span>vs</span>
+                        <select value={c.oppPlayer1} onChange={(e) => setManualCourtPlayer(i, 'oppPlayer1', e.target.value)}>
+                          <option value="">Club Player 1</option>
+                          {availableManualPlayers(players.filter((p) => p.is_opponent), i, 'oppPlayer1').map((p) => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                          ))}
+                        </select>
+                        <select value={c.oppPlayer2} onChange={(e) => setManualCourtPlayer(i, 'oppPlayer2', e.target.value)}>
+                          <option value="">Club Player 2</option>
+                          {availableManualPlayers(players.filter((p) => p.is_opponent), i, 'oppPlayer2').map((p) => (
+                            <option key={p.id} value={p.id}>{p.name}</option>
+                          ))}
+                        </select>
+                        <button className="btn danger" onClick={() => removeManualCourt(i)}><Trash2 size={16} /></button>
+                      </div>
+                    ))}
+
+                    <div className="row">
+                      <button className="btn secondary" onClick={addManualCourt}>+ Add Court</button>
+                      <button className="btn" onClick={saveManualInterClubCourts} disabled={!week?.club_name?.trim() || !manualCourts.length}>Save Courts</button>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <>
@@ -2814,24 +3180,44 @@ export default function App() {
         {tab === 'team' && <Standings rows={teamStandings} type="team" onSelectPlayer={openPlayerDashboard} />}
         {tab === 'playersStand' && <Standings rows={playerStandings} type="player" onSelectPlayer={openPlayerDashboard} awayLabel={week?.club_name} />}
         {tab === 'rankings' && <RankingsStandings rows={rankingRows} onRefresh={loadLeagueRankings} onSelectPlayer={openPlayerDashboard} />}
+        {tab === 'funstats' && <FunStats data={funStats} onSelectPlayer={openPlayerDashboard} />}
 
 
         {tab === 'overall' && (
           <div className="card">
-            <h2>Overall League Standings</h2>
+            <h2>Overall Standings</h2>
             <div className="fireline" />
-            <p className="muted">
-              Calculates all completed games across every week in {league?.name || 'this league'}.
-              {overallCalculatedAt ? ` Last calculated: ${new Date(overallCalculatedAt).toLocaleString()}` : ' Not calculated yet.'}
-            </p>
 
             <div className="row" style={{ marginBottom: 16 }}>
-              <button className="btn" onClick={calculateOverallLeaderboard}>Calculate Leaderboard</button>
-              <button className="btn secondary" onClick={undoOverallLeaderboard}>Undo Overall Leaderboard</button>
-              <button className="btn danger" onClick={clearOverallLeaderboard}>Clear Leaderboard</button>
+              <button className={overallScope === 'league' ? 'btn' : 'btn secondary'} onClick={() => setOverallScope('league')}>This League</button>
+              <button className={overallScope === 'all' ? 'btn' : 'btn secondary'} onClick={() => setOverallScope('all')}>All Leagues</button>
             </div>
 
-            <Standings rows={overallRows} type="player" onSelectPlayer={openPlayerDashboard} />
+            {overallScope === 'league' ? (
+              <>
+                <p className="muted">
+                  Calculates all completed games across every week in {league?.name || 'this league'}.
+                  {overallCalculatedAt ? ` Last calculated: ${new Date(overallCalculatedAt).toLocaleString()}` : ' Not calculated yet.'}
+                </p>
+
+                <div className="row" style={{ marginBottom: 16 }}>
+                  <button className="btn" onClick={calculateOverallLeaderboard}>Calculate Leaderboard</button>
+                  <button className="btn secondary" onClick={undoOverallLeaderboard}>Undo Overall Leaderboard</button>
+                  <button className="btn danger" onClick={clearOverallLeaderboard}>Clear Leaderboard</button>
+                </div>
+
+                <Standings rows={overallRows} type="player" onSelectPlayer={openPlayerDashboard} />
+              </>
+            ) : (
+              <>
+                <p className="muted">
+                  Live combined standings across every league's completed games (Round Robin weeks only).
+                  <button className="btn secondary" onClick={loadAllLeaguesOverall} style={{ marginLeft: 8 }}>Refresh</button>
+                </p>
+
+                <Standings rows={allLeaguesOverallRows} type="player" onSelectPlayer={openPlayerDashboard} />
+              </>
+            )}
           </div>
         )}
 
@@ -2982,6 +3368,125 @@ function RankingsStandings({ rows, onRefresh, onSelectPlayer }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function Leaderboard({ title, emoji, rows, empty, renderValue, onSelectPlayer }) {
+  return (
+    <div className="card">
+      <h3>{emoji} {title}</h3>
+      {rows.length ? (
+        <table>
+          <tbody>
+            {rows.map((r, i) => (
+              <tr key={r.name + i}>
+                <td>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i + 1}</td>
+                <td><PlayerName name={r.name} onSelect={onSelectPlayer} /></td>
+                <td><b>{renderValue(r)}</b></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : <p className="muted">{empty}</p>}
+    </div>
+  );
+}
+
+function FunStats({ data, onSelectPlayer }) {
+  if (!data) {
+    return (
+      <div className="card">
+        <h2>Fun Stats</h2>
+        <div className="fireline" />
+        <p className="muted">No Round Robin data yet in this league.</p>
+      </div>
+    );
+  }
+
+  const { hotStreaks, bestEverStreaks, mostActive, mostLoyal, mostImproved, bestDuo, biggestBlowout, closestMatch } = data;
+
+  return (
+    <div className="card">
+      <h2>Fun Stats</h2>
+      <div className="fireline" />
+      <p className="muted">Interesting stats and records across this league's Round Robin history.</p>
+
+      <div className="grid stats">
+        <Leaderboard title="Hot Streak" emoji="🔥" rows={hotStreaks} onSelectPlayer={onSelectPlayer}
+          empty="Nobody's on a win streak right now." renderValue={(r) => `W${r.value}`} />
+        <Leaderboard title="All-Time Best Streak" emoji="👑" rows={bestEverStreaks} onSelectPlayer={onSelectPlayer}
+          empty="Not enough games yet." renderValue={(r) => `${r.value} in a row`} />
+        <Leaderboard title="Iron Player" emoji="🏸" rows={mostActive} onSelectPlayer={onSelectPlayer}
+          empty="No games played yet." renderValue={(r) => `${r.value} games`} />
+        <Leaderboard title="Most Loyal" emoji="🎽" rows={mostLoyal} onSelectPlayer={onSelectPlayer}
+          empty="No weeks played yet." renderValue={(r) => `${r.value} weeks`} />
+      </div>
+
+      <div className="card">
+        <h3>📈 Most Improved</h3>
+        <p className="muted">Win % this week they played vs. the previous week they played.</p>
+        {mostImproved.length ? (
+          <table>
+            <thead>
+              <tr><th>Rank</th><th>Player</th><th>Previous → Current Week</th><th>Change</th></tr>
+            </thead>
+            <tbody>
+              {mostImproved.map((m, i) => (
+                <tr key={m.name + i}>
+                  <td>{i + 1}</td>
+                  <td><PlayerName name={m.name} onSelect={onSelectPlayer} /></td>
+                  <td>{m.previousWeekName} ({m.previousWinPct}%) → {m.currentWeekName} ({m.currentWinPct}%)</td>
+                  <td className="diffpos">+{m.delta}pp</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <p className="muted">Need at least two played weeks for the same player to compare.</p>}
+      </div>
+
+      <div className="card">
+        <h3>🤝 Dream Team (Best Duo)</h3>
+        <p className="muted">Minimum {MIN_DUO_GAMES} games played together as teammates.</p>
+        {bestDuo.length ? (
+          <table>
+            <thead>
+              <tr><th>Rank</th><th>Duo</th><th>Record</th><th>Win %</th></tr>
+            </thead>
+            <tbody>
+              {bestDuo.map((d, i) => (
+                <tr key={d.names.join('|') + i}>
+                  <td>{i + 1}</td>
+                  <td><PlayerName name={d.names[0]} onSelect={onSelectPlayer} /> &amp; <PlayerName name={d.names[1]} onSelect={onSelectPlayer} /></td>
+                  <td>{d.wins}-{d.losses}</td>
+                  <td><b>{d.winPct}%</b></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : <p className="muted">No duo has played {MIN_DUO_GAMES}+ games together yet.</p>}
+      </div>
+
+      <div className="grid stats">
+        <div className="card">
+          <h3>💥 Biggest Blowout</h3>
+          {biggestBlowout ? (
+            <p>
+              <b>{biggestBlowout.winnerNames.join(' / ')}</b> beat {biggestBlowout.loserNames.join(' / ')}{' '}
+              {biggestBlowout.winnerScore}-{biggestBlowout.loserScore} (by {biggestBlowout.margin}) in {biggestBlowout.weekName}.
+            </p>
+          ) : <p className="muted">No decided games yet.</p>}
+        </div>
+        <div className="card">
+          <h3>😅 Nail-Biter</h3>
+          {closestMatch ? (
+            <p>
+              <b>{closestMatch.winnerNames.join(' / ')}</b> edged out {closestMatch.loserNames.join(' / ')}{' '}
+              {closestMatch.winnerScore}-{closestMatch.loserScore} in {closestMatch.weekName}.
+            </p>
+          ) : <p className="muted">No decided games yet.</p>}
+        </div>
+      </div>
     </div>
   );
 }
