@@ -1,6 +1,6 @@
 # Changelog
 
-## 2026-07-17 — Inter-Club Match Format and Team Standings Cleanup
+## 2026-07-17 — Inter-Club Match Format, Fun Stats, and Cross-League Standings
 
 ### 1. Inter-Club Match Format
 
@@ -26,6 +26,54 @@
 ### 2. Team Standings columns
 
 - Replaced the `MW`/`GW` columns with `MP` (Matches Played) and `MW` (Matches Won).
+
+### 3. Manual court assignment for Inter-Club
+
+- The Teams tab for an Inter-Club week now has an **Auto Generate** / **Manual Setup** mode
+  picker, mirroring Round Robin's mode picker.
+- **Manual Setup** lets you add a row per court ("+ Add Court") and pick exactly who plays each
+  match from dropdowns (2 of our players, 2 of the club's). A player already assigned to one
+  court is automatically excluded from the other courts' dropdowns in that set, so you can't
+  accidentally double-book someone.
+- **Auto Generate** keeps the original random-pairing behavior from earlier in the day, now
+  presented as one of two explicit choices instead of the only option.
+
+### 4. New-week guidance
+
+- Creating a week (from the header "+ Week" button or Settings) now redirects you straight to
+  the Teams tab, where format/team setup happens — previously it left you on whatever tab you
+  started from.
+- A new **"+ Set" button** next to "+ Week" in the header (visible on every tab) jumps to the
+  Teams tab too, so starting the next set doesn't require navigating there manually first.
+- Whenever the selected week has no players yet, a banner appears on every tab reminding you to
+  add players, with a one-click **"Copy Players from '{week}'"** button that finds the most
+  recent *other* week in the league that actually has a roster (skipping empty ones) and copies
+  it over.
+
+### 5. Fun Stats tab
+
+- New **Fun Stats** nav tab with interesting records computed live from each league's Round
+  Robin history: **Hot Streak** (current win streaks), **All-Time Best Streak** (longest win
+  streak ever recorded), **Dream Team** (best teammate duo by win %, minimum 3 games together),
+  **Most Improved** (biggest win % jump between a player's last two played weeks), **Iron
+  Player** (most games played), **Most Loyal** (most distinct weeks attended), **Biggest
+  Blowout**, and **Nail-Biter** (largest/smallest margin games).
+- No schema changes — reuses the same raw match/score data as Rankings, and (like Rankings)
+  excludes Inter-Club weeks.
+
+### 6. Cross-league Overall Standings
+
+- Overall Standings now has **This League** / **All Leagues** sub-tabs. "This League" is the
+  existing persisted calculate/undo/clear flow, unchanged. "All Leagues" is a new live view that
+  aggregates completed games across **every league** in the app, not just the selected one — no
+  separate calculate step, just refreshes when you open it (or via its own Refresh button).
+
+### 7. Shipped to production
+
+- All of the above (plus the 2026-07-16 work) was merged from `feature_Sashank` into `main` and
+  deployed. The `format`/`club_name`/`is_opponent` schema migration was applied directly to the
+  production Supabase project (verified all 4 leagues / 12 weeks / 140 players were left intact)
+  ahead of the frontend deploy.
 
 ## 2026-07-16 — Rankings, Roster, Multi-Set Weeks, and Player Dashboards
 
