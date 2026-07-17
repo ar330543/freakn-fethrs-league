@@ -97,6 +97,12 @@ function shuffleArray(items) {
   return arr;
 }
 
+function chunkIntoPairs(items) {
+  const out = [];
+  for (let i = 0; i + 1 < items.length; i += 2) out.push([items[i], items[i + 1]]);
+  return out;
+}
+
 function randomizedPairOrder(players) {
   const allPairs = pairs(players);
   if (!allPairs.length) return [];
@@ -644,9 +650,13 @@ export default function App() {
   const [regularPlayers, setRegularPlayers] = useState([]);
   const [regularNames, setRegularNames] = useState('');
   const [selectedPlayerName, setSelectedPlayerName] = useState(null);
+  const [clubNameDraft, setClubNameDraft] = useState('');
+  const [opponentNames, setOpponentNames] = useState('');
 
   const league = leagues.find((l) => l.id === leagueId);
   const week = weeks.find((w) => w.id === weekId);
+
+  useEffect(() => { setClubNameDraft(week?.club_name || ''); }, [weekId, week?.club_name]);
 
   useEffect(() => { boot(); }, []);
   useEffect(() => { if (leagueId) { loadWeeks(true); loadOverallLeaderboard(); loadRegularPlayers(); } }, [leagueId]);
@@ -982,6 +992,20 @@ export default function App() {
     });
   }
 
+  async function addOpponentPlayers() {
+    if (!weekId) return fail('No week is selected. Create or select a week before adding players.');
+    const arr = opponentNames.split('\n').map((x) => x.trim()).filter(Boolean);
+    if (!arr.length) return fail('Paste at least one player name.');
+
+    await act(async () => {
+      const { error: err } = await supabase
+        .from('players')
+        .upsert(arr.map((name) => ({ week_id: weekId, name, is_opponent: true })), { onConflict: 'week_id,name' });
+      if (err) throw err;
+      setOpponentNames('');
+    });
+  }
+
   async function removePlayer(player) {
     if (!confirm(`Remove ${player.name}? This may remove related team/game rows.`)) return;
     await act(async () => {
@@ -1068,6 +1092,34 @@ export default function App() {
 
     await act(async () => {
       const { error: err } = await supabase.from('weeks').update({ name }).eq('id', weekId);
+      if (err) throw err;
+      await loadWeeks(false);
+    });
+  }
+
+  async function setWeekFormat(format) {
+    if (!weekId) return fail('No week is selected.');
+
+    await act(async () => {
+      if (format === 'round_robin') {
+        const { error: delErr } = await supabase
+          .from('players').delete().eq('week_id', weekId).eq('is_opponent', true);
+        if (delErr) throw delErr;
+      }
+
+      const { error: err } = await supabase.from('weeks').update({ format }).eq('id', weekId);
+      if (err) throw err;
+      await loadWeeks(false);
+    });
+  }
+
+  async function saveClubName() {
+    if (!weekId) return fail('No week is selected.');
+    const name = clubNameDraft.trim();
+    if (!name) return fail("Enter the visiting club's name.");
+
+    await act(async () => {
+      const { error: err } = await supabase.from('weeks').update({ club_name: name }).eq('id', weekId);
       if (err) throw err;
       await loadWeeks(false);
     });
@@ -1194,6 +1246,69 @@ export default function App() {
     if (gErr) throw gErr;
   }
 
+  async function buildInterClubRound() {
+    if (!weekId) return fail('No week is selected.');
+    const clubName = week?.club_name?.trim();
+    if (!clubName) return fail("Enter and save the visiting club's name first.");
+
+    const ourPlayers = players.filter((p) => !p.is_opponent);
+    const opponentPlayers = players.filter((p) => p.is_opponent);
+    if (ourPlayers.length < 2) return fail('Add at least 2 of our players before generating courts.');
+    if (opponentPlayers.length < 2) return fail(`Add at least 2 players from ${clubName} before generating courts.`);
+
+    const ourPairs = chunkIntoPairs(shuffleArray(ourPlayers));
+    const opponentPairs = chunkIntoPairs(shuffleArray(opponentPlayers));
+    const numCourts = Math.min(ourPairs.length, opponentPairs.length);
+
+    await act(async () => {
+      const { targetSetNumber, mode } = await resolveTargetSet(weekId);
+      if (mode === 'replace') {
+        await deleteSetRows(weekId, targetSetNumber);
+      }
+
+      const { data: insertedTeams, error: tErr } = await supabase
+        .from('teams')
+        .insert([
+          { week_id: weekId, set_number: targetSetNumber, name: 'Home', emoji: '🏠', color: '#ff3b00' },
+          { week_id: weekId, set_number: targetSetNumber, name: clubName, emoji: '🏸', color: '#38bdf8' },
+        ])
+        .select();
+      if (tErr) throw tErr;
+
+      const [homeTeam, clubTeam] = insertedTeams;
+
+      const links = [
+        ...ourPlayers.map((p) => ({ team_id: homeTeam.id, player_id: p.id })),
+        ...opponentPlayers.map((p) => ({ team_id: clubTeam.id, player_id: p.id })),
+      ];
+      const { error: linkErr } = await supabase.from('team_players').insert(links);
+      if (linkErr) throw linkErr;
+
+      const matchRows = Array.from({ length: numCourts }, (_, i) => ({
+        week_id: weekId,
+        set_number: targetSetNumber,
+        slot: 1,
+        court: String.fromCharCode(65 + i),
+        team1_id: homeTeam.id,
+        team2_id: clubTeam.id,
+      }));
+      const { data: insertedMatches, error: mErr } = await supabase.from('matches').insert(matchRows).select();
+      if (mErr) throw mErr;
+
+      const sortedMatches = [...insertedMatches].sort((a, b) => a.court.localeCompare(b.court));
+      const gameRows = sortedMatches.map((match, i) => ({
+        match_id: match.id,
+        game_number: 1,
+        t1_player1_id: ourPairs[i][0].id,
+        t1_player2_id: ourPairs[i][1].id,
+        t2_player1_id: opponentPairs[i][0].id,
+        t2_player2_id: opponentPairs[i][1].id,
+      }));
+      const { error: gErr } = await supabase.from('match_games').insert(gameRows);
+      if (gErr) throw gErr;
+    });
+  }
+
 
 
   async function getHistoricalTeammatePairSets(targetSetNumber) {
@@ -1233,7 +1348,7 @@ export default function App() {
       }
     }
 
-    const leagueWeeks = await fetchLeagueWeeks();
+    const leagueWeeks = await fetchLeagueWeeks({ excludeInterClub: true });
     const currentWeek = leagueWeeks.find((item) => item.id === weekId);
     if (!currentWeek) return { allLeague, lastTwoWeeks, lastWeek };
 
@@ -1316,12 +1431,14 @@ export default function App() {
     return { allLeague, lastTwoWeeks, lastWeek };
   }
 
-  async function fetchLeagueWeeks() {
+  async function fetchLeagueWeeks({ excludeInterClub = false } = {}) {
     if (!leagueId) return [];
-    const { data, error: err } = await supabase
+    let query = supabase
       .from('weeks')
-      .select('id, name, created_at')
+      .select('id, name, created_at, format')
       .eq('league_id', leagueId);
+    if (excludeInterClub) query = query.neq('format', 'inter_club');
+    const { data, error: err } = await query;
     if (err) throw err;
     return data || [];
   }
@@ -1329,7 +1446,7 @@ export default function App() {
   async function getHistoricalFormStats() {
     if (!leagueId || !weekId) return [];
 
-    const leagueWeeks = await fetchLeagueWeeks();
+    const leagueWeeks = await fetchLeagueWeeks({ excludeInterClub: true });
     const currentWeek = leagueWeeks.find((item) => item.id === weekId);
     if (!currentWeek) return [];
 
@@ -1348,7 +1465,7 @@ export default function App() {
       return;
     }
 
-    const leagueWeeks = await fetchLeagueWeeks();
+    const leagueWeeks = await fetchLeagueWeeks({ excludeInterClub: true });
     if (!leagueWeeks.length) {
       setRankingRows([]);
       return;
@@ -1791,7 +1908,8 @@ export default function App() {
       const { data: leagueWeeks, error: wErr } = await supabase
         .from('weeks')
         .select('id,name')
-        .eq('league_id', leagueId);
+        .eq('league_id', leagueId)
+        .neq('format', 'inter_club');
       if (wErr) throw wErr;
 
       const weekIds = (leagueWeeks || []).map((w) => w.id);
@@ -2036,7 +2154,7 @@ export default function App() {
   const playerStandings = useMemo(() => {
     const stats = {};
     players.forEach((p) => {
-      stats[p.id] = { id: p.id, player: p.name, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0 };
+      stats[p.id] = { id: p.id, player: p.name, isOpponent: p.is_opponent, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0 };
     });
 
     games.forEach((game) => {
@@ -2207,7 +2325,7 @@ export default function App() {
             </select>
 
             <select value={weekId} onChange={(e) => setWeekId(e.target.value)}>
-              {weeks.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+              {weeks.map((w) => <option key={w.id} value={w.id}>{w.name}{w.format === 'inter_club' ? ' (Inter-Club)' : ''}</option>)}
             </select>
 
             <button className="btn" onClick={newWeek}><Plus size={16} /> Week</button>
@@ -2259,7 +2377,7 @@ export default function App() {
 
             <table>
               <tbody>
-                {players.map((p) => (
+                {players.filter((p) => !p.is_opponent).map((p) => (
                   <tr key={p.id}>
                     <td><PlayerName name={p.name} onSelect={openPlayerDashboard} /></td>
                     <td style={{ width: 120 }}><button className="btn danger" onClick={() => removePlayer(p)}><Trash2 size={16} /></button></td>
@@ -2296,56 +2414,134 @@ export default function App() {
         {tab === 'teams' && (
           <div className="card">
             <h2>Team Setup</h2>
-            <div className="row">
-              <button className={mode === 'auto' ? 'btn' : 'btn secondary'} onClick={() => setMode('auto')}>Auto Generate</button>
-              <button className={mode === 'balanced' ? 'btn' : 'btn secondary'} onClick={() => setMode('balanced')}>Balanced Teams</button>
-              <button className={mode === 'manual' ? 'btn' : 'btn secondary'} onClick={() => setMode('manual')}>Handpick Teams</button>
-            </div>
 
-            {mode === 'auto' ? (
+            {teams.length === 0 ? (
               <div className="card">
-                <h3>Automatic Team Generator</h3>
-                <button className="btn" onClick={randomTeams}>Generate Teams by Players per Team</button>
-              </div>
-            ) : mode === 'balanced' ? (
-              <div className="card">
-                <h3>Skill-Balanced Team Generator</h3>
-                <p className="muted">
-                  Builds teams so total recent-form Rank Score is spread evenly across teams, while still
-                  avoiding repeat teammates from league history (falling back to the last 2 weeks, then the
-                  immediately previous week, if a full split isn't mathematically possible).
-                </p>
-                <button className="btn" onClick={balancedTeams}>Generate Balanced Teams by Players per Team</button>
+                <h3>Match Format</h3>
+                <div className="row">
+                  <button
+                    className={week?.format !== 'inter_club' ? 'btn' : 'btn secondary'}
+                    onClick={() => setWeekFormat('round_robin')}
+                  >
+                    Round Robin (Internal)
+                  </button>
+                  <button
+                    className={week?.format === 'inter_club' ? 'btn' : 'btn secondary'}
+                    onClick={() => setWeekFormat('inter_club')}
+                  >
+                    Inter-Club Match
+                  </button>
+                </div>
+
+                {week?.format === 'inter_club' && (
+                  <div className="row" style={{ marginTop: 8 }}>
+                    <label>Visiting Club Name
+                      <input
+                        type="text"
+                        value={clubNameDraft}
+                        onChange={(e) => setClubNameDraft(e.target.value)}
+                        placeholder="e.g. Riverside Badminton Club"
+                      />
+                    </label>
+                    <button className="btn green" onClick={saveClubName} disabled={!clubNameDraft.trim()}>Save Club Name</button>
+                  </div>
+                )}
               </div>
             ) : (
+              <p className="muted">
+                Format: <b>{week?.format === 'inter_club' ? `Inter-Club vs ${week.club_name || '?'}` : 'Round Robin (Internal)'}</b>
+                {' '}— locked once teams exist for this week.
+              </p>
+            )}
+
+            {week?.format === 'inter_club' ? (
               <div className="card">
-                <h3>Manual Team Assignment</h3>
+                <h3>Visiting Club Roster</h3>
+                <p className="muted">
+                  Add the players participating from {week?.club_name?.trim() || 'the visiting club'} this week.
+                  Our own players are still added from the Players tab.
+                </p>
+                <textarea
+                  value={opponentNames}
+                  onChange={(e) => setOpponentNames(e.target.value)}
+                  placeholder="Paste visiting club player names, one per line"
+                />
+                <button className="btn" onClick={addOpponentPlayers}>Add / Import Club Players</button>
+
+                <table>
+                  <tbody>
+                    {players.filter((p) => p.is_opponent).map((p) => (
+                      <tr key={p.id}>
+                        <td><PlayerName name={p.name} onSelect={openPlayerDashboard} /></td>
+                        <td style={{ width: 120 }}><button className="btn danger" onClick={() => removePlayer(p)}><Trash2 size={16} /></button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+
+                <h3>Courts</h3>
+                <p className="muted">
+                  Randomly pairs our available players and {week?.club_name?.trim() || 'the club'}'s available
+                  players into doubles, one court per pair, so multiple matches can run at the same time.
+                  Re-running while the current set is unscored replaces it; once a set has scores, this starts
+                  a new set instead.
+                </p>
+                <button className="btn" onClick={buildInterClubRound} disabled={!week?.club_name?.trim()}>Generate Courts</button>
+              </div>
+            ) : (
+              <>
                 <div className="row">
-                  <label>Number of Teams
-                    <input type="text" inputMode="numeric" value={manual.teamCount} onChange={(e) => setManual({ ...manual, teamCount: e.target.value })} />
-                  </label>
-                  <button className="btn green" onClick={saveManualTeams}>Save Manual Teams + Schedule</button>
+                  <button className={mode === 'auto' ? 'btn' : 'btn secondary'} onClick={() => setMode('auto')}>Auto Generate</button>
+                  <button className={mode === 'balanced' ? 'btn' : 'btn secondary'} onClick={() => setMode('balanced')}>Balanced Teams</button>
+                  <button className={mode === 'manual' ? 'btn' : 'btn secondary'} onClick={() => setMode('manual')}>Handpick Teams</button>
                 </div>
 
-                <div className="manualGrid">
-                  {Array.from({ length: Number(manual.teamCount) || 0 }, (_, i) => (
-                    <div className="card" key={i}>
-                      <h3>{teamColors[i % teamColors.length][1]} {teamColors[i % teamColors.length][0]}</h3>
-                      {players.map((p) => (
-                        <label className="checkrow" key={p.id}>
-                          <input
-                            type="radio"
-                            name={`assign-${p.id}`}
-                            checked={Number(manual.assignments[p.id]) === i}
-                            onChange={() => setManualAssign(p.id, i)}
-                          />
-                          {p.name}
-                        </label>
+                {mode === 'auto' ? (
+                  <div className="card">
+                    <h3>Automatic Team Generator</h3>
+                    <button className="btn" onClick={randomTeams}>Generate Teams by Players per Team</button>
+                  </div>
+                ) : mode === 'balanced' ? (
+                  <div className="card">
+                    <h3>Skill-Balanced Team Generator</h3>
+                    <p className="muted">
+                      Builds teams so total recent-form Rank Score is spread evenly across teams, while still
+                      avoiding repeat teammates from league history (falling back to the last 2 weeks, then the
+                      immediately previous week, if a full split isn't mathematically possible).
+                    </p>
+                    <button className="btn" onClick={balancedTeams}>Generate Balanced Teams by Players per Team</button>
+                  </div>
+                ) : (
+                  <div className="card">
+                    <h3>Manual Team Assignment</h3>
+                    <div className="row">
+                      <label>Number of Teams
+                        <input type="text" inputMode="numeric" value={manual.teamCount} onChange={(e) => setManual({ ...manual, teamCount: e.target.value })} />
+                      </label>
+                      <button className="btn green" onClick={saveManualTeams}>Save Manual Teams + Schedule</button>
+                    </div>
+
+                    <div className="manualGrid">
+                      {Array.from({ length: Number(manual.teamCount) || 0 }, (_, i) => (
+                        <div className="card" key={i}>
+                          <h3>{teamColors[i % teamColors.length][1]} {teamColors[i % teamColors.length][0]}</h3>
+                          {players.map((p) => (
+                            <label className="checkrow" key={p.id}>
+                              <input
+                                type="radio"
+                                name={`assign-${p.id}`}
+                                checked={Number(manual.assignments[p.id]) === i}
+                                onChange={() => setManualAssign(p.id, i)}
+                              />
+                              {p.name}
+                            </label>
+                          ))}
+                        </div>
                       ))}
                     </div>
-                  ))}
-                </div>
-              </div>
+                  </div>
+                )}
+              </>
             )}
 
             <h2>Current Teams</h2>
@@ -2614,7 +2810,7 @@ export default function App() {
 
 
         {tab === 'team' && <Standings rows={teamStandings} type="team" onSelectPlayer={openPlayerDashboard} />}
-        {tab === 'playersStand' && <Standings rows={playerStandings} type="player" onSelectPlayer={openPlayerDashboard} />}
+        {tab === 'playersStand' && <Standings rows={playerStandings} type="player" onSelectPlayer={openPlayerDashboard} awayLabel={week?.club_name} />}
         {tab === 'rankings' && <RankingsStandings rows={rankingRows} onRefresh={loadLeagueRankings} onSelectPlayer={openPlayerDashboard} />}
 
 
@@ -2677,7 +2873,7 @@ function PlayerName({ name, onSelect }) {
   return <button type="button" className="playerNameLink" onClick={() => onSelect(name)}>{name}</button>;
 }
 
-function Standings({ rows, type, onSelectPlayer }) {
+function Standings({ rows, type, onSelectPlayer, awayLabel }) {
   return (
     <div className="card">
       <h2>Standings</h2>
@@ -2686,7 +2882,7 @@ function Standings({ rows, type, onSelectPlayer }) {
       {type === 'team' ? (
         <table>
           <thead>
-            <tr><th>Rank</th><th>Team</th><th>MW</th><th>GW</th><th>PF</th><th>PA</th><th>Diff</th></tr>
+            <tr><th>Rank</th><th>Team</th><th>MP</th><th>MW</th><th>PF</th><th>PA</th><th>Diff</th></tr>
           </thead>
           <tbody>
             {rows.map((s, i) => (
@@ -2704,8 +2900,8 @@ function Standings({ rows, type, onSelectPlayer }) {
                         : 'No players assigned'}
                     </div>
                   </td>
+                <td>{s.played}</td>
                 <td>{s.matchWins}</td>
-                <td>{s.gameWins}</td>
                 <td>{s.pointsFor}</td>
                 <td>{s.pointsAgainst}</td>
                 <td className={s.pointDiff >= 0 ? 'diffpos' : 'diffneg'}>{s.pointDiff > 0 ? '+' : ''}{s.pointDiff}</td>
@@ -2722,7 +2918,14 @@ function Standings({ rows, type, onSelectPlayer }) {
             {rows.map((s, i) => (
               <tr key={s.id ?? s.player}>
                 <td>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i + 1}</td>
-                <td><b><PlayerName name={s.player} onSelect={onSelectPlayer} /></b></td>
+                <td>
+                  <b><PlayerName name={s.player} onSelect={onSelectPlayer} /></b>
+                  {s.isOpponent && (
+                    <span className="pill" style={{ marginLeft: 6, background: '#38bdf833', color: '#38bdf8' }}>
+                      {awayLabel || 'Away'}
+                    </span>
+                  )}
+                </td>
                 <td>{s.played}</td>
                 <td>{s.wins}</td>
                 <td>{s.losses}</td>

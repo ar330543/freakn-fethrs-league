@@ -246,3 +246,17 @@ begin
   delete from score_history where id = h.id;
 end;
 $$ language plpgsql security definer;
+
+
+
+-- V22 non-destructive inter-club match format
+-- Reuses the existing teams/matches/match_games tables: an inter-club week
+-- just has exactly two teams ("Home" and the visiting club) and players
+-- flagged is_opponent belong to the visiting club's roster for that week.
+alter table weeks add column if not exists format text not null default 'round_robin';
+do $$ begin
+  alter table weeks add constraint weeks_format_check check (format in ('round_robin', 'inter_club'));
+exception when duplicate_object then null; end $$;
+alter table weeks add column if not exists club_name text;
+
+alter table players add column if not exists is_opponent boolean not null default false;

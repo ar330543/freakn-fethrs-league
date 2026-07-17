@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-07-17 — Inter-Club Match Format and Team Standings Cleanup
+
+### 1. Inter-Club Match Format
+
+- Each week can now be set to **Round Robin (Internal)** (the existing behavior) or
+  **Inter-Club Match** — a new format for playing a visiting club instead of splitting our own
+  group into internal teams. Picked from the Teams tab; locked once a week has any teams so the
+  format can't be changed mid-setup.
+- Inter-Club weeks get a **Visiting Club Roster**: enter the club's name and paste in that day's
+  participating players, separate from our own Players tab.
+- **Generate Courts** randomly pairs our available players and the visiting club's available
+  players into doubles, one match per court, all running at the same time (multiple courts booked
+  simultaneously is the normal case, not an edge case) — reuses the existing multi-set/"Delete
+  This Set" mechanics from Round Robin weeks.
+- Team Standings for an Inter-Club week becomes the Home vs. Club scoreboard automatically; Player
+  Standings tags visiting-club players with the club name so they're easy to tell apart from our
+  own roster.
+- Inter-Club weeks are excluded from the cross-week Rankings, Overall Standings, and the
+  teammate-repeat/skill-balancing history used by Round Robin's team generators, so a club match
+  day never skews internal league stats.
+- New columns: `format` and `club_name` on `weeks`, `is_opponent` on `players`. No new tables —
+  reuses the existing teams/matches/match_games/game_scores structures.
+
+### 2. Team Standings columns
+
+- Replaced the `MW`/`GW` columns with `MP` (Matches Played) and `MW` (Matches Won).
+
 ## 2026-07-16 — Rankings, Roster, Multi-Set Weeks, and Player Dashboards
 
 A major update covering four new features plus two bug fixes, developed and tested on a
