@@ -322,6 +322,7 @@ function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRow
     .filter(Boolean)
     .sort((a, b) =>
       a.weekIdx - b.weekIdx ||
+      Number(a.match.set_number || 1) - Number(b.match.set_number || 1) ||
       Number(a.match.slot) - Number(b.match.slot) ||
       String(a.match.court).localeCompare(String(b.match.court)) ||
       Number(a.game.game_number) - Number(b.game.game_number)
@@ -330,12 +331,12 @@ function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRow
   const byPlayer = {};
 
   function ensure(name) {
-    if (!byPlayer[name]) byPlayer[name] = { orderedResults: [], perWeek: {} };
+    if (!byPlayer[name]) byPlayer[name] = { orderedResults: [], perWeek: {}, gameLog: [] };
     return byPlayer[name];
   }
 
-  orderableGames.forEach(({ game, weekIdx, score1, score2 }) => {
-    const record = (playerId, pf, pa, won) => {
+  orderableGames.forEach(({ game, match, weekIdx, score1, score2 }) => {
+    const record = (playerId, teammateId, opponentIds, pf, pa, won) => {
       const name = normalizedNameById[playerId];
       if (!name) return;
 
@@ -346,11 +347,23 @@ function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRow
         if (!p.perWeek[weekIdx]) p.perWeek[weekIdx] = { wins: 0, losses: 0 };
         won ? p.perWeek[weekIdx].wins++ : p.perWeek[weekIdx].losses++;
       }
+
+      p.gameLog.push({
+        weekIdx,
+        setNumber: match?.set_number ?? 1,
+        teammateName: displayNameByNormalized[normalizedNameById[teammateId]] || null,
+        opponentNames: opponentIds.map((id) => displayNameByNormalized[normalizedNameById[id]] || '-'),
+        playerScore: pf,
+        opponentScore: pa,
+        result: won === null ? 'T' : won ? 'W' : 'L',
+      });
     };
 
     const won1 = score1 > score2 ? true : score2 > score1 ? false : null;
-    [game.t1_player1_id, game.t1_player2_id].forEach((id) => record(id, score1, score2, won1));
-    [game.t2_player1_id, game.t2_player2_id].forEach((id) => record(id, score2, score1, won1 === null ? null : !won1));
+    record(game.t1_player1_id, game.t1_player2_id, [game.t2_player1_id, game.t2_player2_id], score1, score2, won1);
+    record(game.t1_player2_id, game.t1_player1_id, [game.t2_player1_id, game.t2_player2_id], score1, score2, won1);
+    record(game.t2_player1_id, game.t2_player2_id, [game.t1_player1_id, game.t1_player2_id], score2, score1, won1 === null ? null : !won1);
+    record(game.t2_player2_id, game.t2_player1_id, [game.t1_player1_id, game.t1_player2_id], score2, score1, won1 === null ? null : !won1);
   });
 
   return Object.entries(byPlayer).map(([normalizedName, p]) => {
@@ -371,6 +384,22 @@ function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRow
       rankScore += netWins * (FORM_RECENCY_DECAY ** weeksAgo);
     });
 
+    const perWeekBreakdown = playedWeekIdxs.sort((a, b) => a - b).map((wi) => {
+      const { wins: wWins, losses: wLosses } = p.perWeek[wi];
+      const played = wWins + wLosses;
+      return {
+        weekName: weekOrder[wi]?.name || `Week ${wi + 1}`,
+        wins: wWins,
+        losses: wLosses,
+        winPct: played ? Math.round((wWins / played) * 100) : 0,
+      };
+    });
+
+    const gameLog = [...p.gameLog].reverse().map(({ weekIdx, ...rest }) => ({
+      weekName: weekOrder[weekIdx]?.name || `Week ${weekIdx + 1}`,
+      ...rest,
+    }));
+
     return {
       normalizedName,
       displayName: displayNameByNormalized[normalizedName] || normalizedName,
@@ -382,6 +411,8 @@ function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRow
       pointsAgainst,
       pointDiff: pointsFor - pointsAgainst,
       rankScore,
+      perWeekBreakdown,
+      gameLog,
     };
   }).sort((a, b) =>
     b.rankScore - a.rankScore ||
@@ -396,7 +427,7 @@ async function fetchFormRawData(weekIds) {
 
   const [playersRes, matchesRes] = await Promise.all([
     supabase.from('players').select('id, week_id, name, created_at').in('week_id', weekIds),
-    supabase.from('matches').select('id, week_id, slot, court').in('week_id', weekIds),
+    supabase.from('matches').select('id, week_id, slot, court, set_number').in('week_id', weekIds),
   ]);
   if (playersRes.error) throw playersRes.error;
   if (matchesRes.error) throw matchesRes.error;
@@ -419,6 +450,64 @@ async function fetchFormRawData(weekIds) {
     gamesRows: gamesRes.data || [],
     scoresRows: scoresRes.data || [],
   };
+}
+
+async function resolveTargetSet(weekId) {
+  const { data: teamRows, error: teamErr } = await supabase
+    .from('teams').select('id, set_number').eq('week_id', weekId);
+  if (teamErr) throw teamErr;
+
+  if (!teamRows?.length) return { targetSetNumber: 1, mode: 'create' };
+
+  const maxSet = Math.max(...teamRows.map((t) => t.set_number || 1));
+
+  const { data: matchRows, error: matchErr } = await supabase
+    .from('matches').select('id').eq('week_id', weekId).eq('set_number', maxSet);
+  if (matchErr) throw matchErr;
+  const matchIds = (matchRows || []).map((m) => m.id);
+  if (!matchIds.length) return { targetSetNumber: maxSet, mode: 'replace' };
+
+  const { data: gameRows, error: gameErr } = await supabase
+    .from('match_games').select('id').in('match_id', matchIds);
+  if (gameErr) throw gameErr;
+  const gameIds = (gameRows || []).map((g) => g.id);
+
+  let hasScored = false;
+  if (gameIds.length) {
+    const { data: scoreRows, error: scoreErr } = await supabase
+      .from('game_scores').select('game_id')
+      .in('game_id', gameIds).not('score1', 'is', null).not('score2', 'is', null);
+    if (scoreErr) throw scoreErr;
+    hasScored = !!scoreRows?.length;
+  }
+
+  return hasScored
+    ? { targetSetNumber: maxSet + 1, mode: 'create' }
+    : { targetSetNumber: maxSet, mode: 'replace' };
+}
+
+async function deleteScoreHistoryForGames(gameIds) {
+  if (!gameIds.length) return;
+  const { error } = await supabase.from('score_history').delete().in('game_id', gameIds);
+  if (error) throw error;
+}
+
+async function deleteSetRows(weekId, setNumber) {
+  const { data: teamRows } = await supabase.from('teams').select('id').eq('week_id', weekId).eq('set_number', setNumber);
+  const teamIds = (teamRows || []).map((t) => t.id);
+  if (!teamIds.length) return;
+
+  const { data: matchRows } = await supabase.from('matches').select('id').eq('week_id', weekId).eq('set_number', setNumber);
+  const matchIds = (matchRows || []).map((m) => m.id);
+
+  if (matchIds.length) {
+    const { data: gameRows } = await supabase.from('match_games').select('id').in('match_id', matchIds);
+    const gameIds = (gameRows || []).map((g) => g.id);
+    await deleteScoreHistoryForGames(gameIds);
+  }
+
+  const { error: delErr } = await supabase.from('teams').delete().in('id', teamIds);
+  if (delErr) throw delErr;
 }
 
 function buildSkillBalancedTeams(teamPlayers, count, forbiddenPairs, rankScoreByNormalizedName) {
@@ -554,6 +643,7 @@ export default function App() {
   const [rankingRows, setRankingRows] = useState([]);
   const [regularPlayers, setRegularPlayers] = useState([]);
   const [regularNames, setRegularNames] = useState('');
+  const [selectedPlayerName, setSelectedPlayerName] = useState(null);
 
   const league = leagues.find((l) => l.id === leagueId);
   const week = weeks.find((w) => w.id === weekId);
@@ -861,12 +951,19 @@ export default function App() {
   function TeamLabel({ teamId }) {
     const t = team(teamId);
     if (!t) return <span>-</span>;
+    const members = playersForTeam(teamId);
     return (
       <div>
         <div className="pill" style={{ background: `${t.color}33`, color: t.color }}>
           {t.emoji} {t.name}
         </div>
-        <div className="teamMembers">{teamMembersText(teamId)}</div>
+        <div className="teamMembers">
+          {members.length
+            ? members.map((p, i) => (
+              <span key={p.id}>{i > 0 && ' · '}<PlayerName name={p.name} onSelect={openPlayerDashboard} /></span>
+            ))
+            : 'No players assigned'}
+        </div>
       </div>
     );
   }
@@ -984,6 +1081,13 @@ export default function App() {
     if (!confirm(`Delete ${week?.name || 'this week'}? This deletes only that week.`)) return;
 
     await act(async () => {
+      const { data: matchRows } = await supabase.from('matches').select('id').eq('week_id', weekId);
+      const matchIds = (matchRows || []).map((m) => m.id);
+      if (matchIds.length) {
+        const { data: gameRows } = await supabase.from('match_games').select('id').in('match_id', matchIds);
+        await deleteScoreHistoryForGames((gameRows || []).map((g) => g.id));
+      }
+
       const { error: err } = await supabase.from('weeks').delete().eq('id', weekId);
       if (err) throw err;
       setWeekId(nextWeek?.id || '');
@@ -998,6 +1102,17 @@ export default function App() {
     if (!confirm('Delete entire league? This removes all weeks in this league only.')) return;
 
     await act(async () => {
+      const leagueWeeks = await fetchLeagueWeeks();
+      const leagueWeekIds = leagueWeeks.map((w) => w.id);
+      if (leagueWeekIds.length) {
+        const { data: matchRows } = await supabase.from('matches').select('id').in('week_id', leagueWeekIds);
+        const matchIds = (matchRows || []).map((m) => m.id);
+        if (matchIds.length) {
+          const { data: gameRows } = await supabase.from('match_games').select('id').in('match_id', matchIds);
+          await deleteScoreHistoryForGames((gameRows || []).map((g) => g.id));
+        }
+      }
+
       const { error: err } = await supabase.from('leagues').delete().eq('id', leagueId);
       if (err) throw err;
       setLeagueId(nextLeague?.id || '');
@@ -1006,18 +1121,24 @@ export default function App() {
     });
   }
 
-  async function clearWeekSchedule() {
-    await supabase.from('teams').delete().eq('week_id', weekId);
+  async function deleteSet(setNumber) {
+    if (!weekId) return fail('No week is selected.');
+    if (!confirm(`Delete Set ${setNumber}? This deletes its teams, matches, and scores. Other sets in this week are not affected.`)) return;
+    await act(async () => {
+      await deleteSetRows(weekId, setNumber);
+    });
   }
 
-  async function buildTeamsAndSchedule(teamDefs) {
+  async function buildTeamsAndSchedule(teamDefs, targetSetNumber, mode) {
     if (teamDefs.some((t) => t.players.length < 2)) throw new Error('Every team must have at least 2 players.');
 
-    await clearWeekSchedule();
+    if (mode === 'replace') {
+      await deleteSetRows(weekId, targetSetNumber);
+    }
 
     const { data: insertedTeams, error: tErr } = await supabase
       .from('teams')
-      .insert(teamDefs.map((t) => ({ week_id: weekId, name: t.name, emoji: t.emoji, color: t.color })))
+      .insert(teamDefs.map((t) => ({ week_id: weekId, set_number: targetSetNumber, name: t.name, emoji: t.emoji, color: t.color })))
       .select();
     if (tErr) throw tErr;
 
@@ -1034,6 +1155,7 @@ export default function App() {
       roundPairs.forEach(([teamA, teamB], courtIndex) => {
         matchRows.push({
           week_id: weekId,
+          set_number: targetSetNumber,
           slot: roundIndex + 1,
           court: String.fromCharCode(65 + courtIndex),
           team1_id: teamA.id,
@@ -1074,18 +1196,46 @@ export default function App() {
 
 
 
-  async function getHistoricalTeammatePairSets() {
-    const empty = {
-      allLeague: new Set(),
-      lastTwoWeeks: new Set(),
-      lastWeek: new Set(),
-    };
+  async function getHistoricalTeammatePairSets(targetSetNumber) {
+    const allLeague = new Set();
+    const lastTwoWeeks = new Set();
+    const lastWeek = new Set();
 
-    if (!leagueId || !weekId) return empty;
+    if (!leagueId || !weekId) return { allLeague, lastTwoWeeks, lastWeek };
+
+    if (targetSetNumber > 1) {
+      const { data: curTeams, error: curTeamErr } = await supabase
+        .from('teams').select('id').eq('week_id', weekId).lt('set_number', targetSetNumber);
+      if (curTeamErr) throw curTeamErr;
+      const curTeamIds = (curTeams || []).map((t) => t.id);
+
+      if (curTeamIds.length) {
+        const { data: curLinks, error: curLinkErr } = await supabase
+          .from('team_players').select('team_id, player_id').in('team_id', curTeamIds);
+        if (curLinkErr) throw curLinkErr;
+
+        const nameById = Object.fromEntries(players.map((p) => [p.id, normalizePlayerName(p.name)]));
+        const namesByTeam = {};
+        (curLinks || []).forEach((l) => {
+          const n = nameById[l.player_id];
+          if (!n) return;
+          if (!namesByTeam[l.team_id]) namesByTeam[l.team_id] = [];
+          namesByTeam[l.team_id].push(n);
+        });
+
+        Object.values(namesByTeam).forEach((names) => {
+          teamPairKeysFromNames(names).forEach((key) => {
+            allLeague.add(key);
+            lastTwoWeeks.add(key);
+            lastWeek.add(key);
+          });
+        });
+      }
+    }
 
     const leagueWeeks = await fetchLeagueWeeks();
     const currentWeek = leagueWeeks.find((item) => item.id === weekId);
-    if (!currentWeek) return empty;
+    if (!currentWeek) return { allLeague, lastTwoWeeks, lastWeek };
 
     const historicalWeeks = leagueWeeks
       .filter(
@@ -1095,7 +1245,7 @@ export default function App() {
       )
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
 
-    if (!historicalWeeks.length) return empty;
+    if (!historicalWeeks.length) return { allLeague, lastTwoWeeks, lastWeek };
 
     const allWeekIds = historicalWeeks.map((item) => item.id);
     const lastTwoWeekIds = historicalWeeks.slice(0, 2).map((item) => item.id);
@@ -1119,7 +1269,7 @@ export default function App() {
     const historicalPlayers = historicalPlayersResult.data || [];
     const teamIds = historicalTeams.map((item) => item.id);
 
-    if (!teamIds.length) return empty;
+    if (!teamIds.length) return { allLeague, lastTwoWeeks, lastWeek };
 
     const { data: historicalLinks, error: linkError } = await supabase
       .from('team_players')
@@ -1145,10 +1295,6 @@ export default function App() {
       if (!playerNamesByTeam[link.team_id]) playerNamesByTeam[link.team_id] = [];
       playerNamesByTeam[link.team_id].push(normalizedName);
     });
-
-    const allLeague = new Set();
-    const lastTwoWeeks = new Set();
-    const lastWeek = new Set();
 
     Object.entries(playerNamesByTeam).forEach(([teamId, playerNames]) => {
       const historicalWeekId = teamWeekById[teamId];
@@ -1210,6 +1356,11 @@ export default function App() {
 
     const raw = await fetchFormRawData(leagueWeeks.map((item) => item.id));
     setRankingRows(computeLeagueFormStats(leagueWeeks, raw.playersRows, raw.matchesRows, raw.gamesRows, raw.scoresRows));
+  }
+
+  async function openPlayerDashboard(rawName) {
+    setSelectedPlayerName(normalizePlayerName(rawName));
+    await loadLeagueRankings();
   }
 
   function findTeamDefsWithAvoidance(count, historicalPairs) {
@@ -1317,7 +1468,8 @@ export default function App() {
     if (teamCountValidation) return fail(teamCountValidation);
 
     await act(async () => {
-      const historicalPairs = await getHistoricalTeammatePairSets();
+      const { targetSetNumber, mode } = await resolveTargetSet(weekId);
+      const historicalPairs = await getHistoricalTeammatePairSets(targetSetNumber);
       const result = findTeamDefsWithAvoidance(teamCount, historicalPairs);
 
       if (!result.defs) {
@@ -1342,7 +1494,7 @@ export default function App() {
         );
       }
 
-      await buildTeamsAndSchedule(result.defs);
+      await buildTeamsAndSchedule(result.defs, targetSetNumber, mode);
     });
   }
 
@@ -1374,8 +1526,9 @@ export default function App() {
     if (teamCountValidation) return fail(teamCountValidation);
 
     await act(async () => {
+      const { targetSetNumber, mode } = await resolveTargetSet(weekId);
       const [historicalPairs, formStats] = await Promise.all([
-        getHistoricalTeammatePairSets(),
+        getHistoricalTeammatePairSets(targetSetNumber),
         getHistoricalFormStats(),
       ]);
 
@@ -1407,7 +1560,7 @@ export default function App() {
         );
       }
 
-      await buildTeamsAndSchedule(result.defs);
+      await buildTeamsAndSchedule(result.defs, targetSetNumber, mode);
     });
   }
 
@@ -1435,7 +1588,10 @@ export default function App() {
     const smallTeam = defs.find((t) => t.players.length < 2);
     if (smallTeam) return fail(`${smallTeam.name} has fewer than 2 players.`);
 
-    await act(async () => buildTeamsAndSchedule(defs));
+    await act(async () => {
+      const { targetSetNumber, mode } = await resolveTargetSet(weekId);
+      await buildTeamsAndSchedule(defs, targetSetNumber, mode);
+    });
   }
 
   function draftChange(gameId, side, value) {
@@ -1516,8 +1672,9 @@ export default function App() {
   }
 
   async function undo() {
+    if (!weekId) return fail('No week is selected.');
     await act(async () => {
-      const { error: err } = await supabase.rpc('undo_last_score');
+      const { error: err } = await supabase.rpc('undo_last_score', { p_week_id: weekId });
       if (err) throw err;
     });
   }
@@ -1546,7 +1703,7 @@ export default function App() {
 
     const editor = (
       <div className="game">
-        <div className="gamePair gamePairLeft">{playerName(game.t1_player1_id)} / {playerName(game.t1_player2_id)}</div>
+        <div className="gamePair gamePairLeft"><PlayerName name={playerName(game.t1_player1_id)} onSelect={openPlayerDashboard} /> / <PlayerName name={playerName(game.t1_player2_id)} onSelect={openPlayerDashboard} /></div>
         <input
           aria-label={`Score for ${playerName(game.t1_player1_id)} and ${playerName(game.t1_player2_id)}`}
           className="score scoreOne"
@@ -1565,7 +1722,7 @@ export default function App() {
           value={shown.score2 ?? ''}
           onChange={(event) => draftChange(game.id, 'score2', event.target.value)}
         />
-        <div className="gamePair gamePairRight">{playerName(game.t2_player1_id)} / {playerName(game.t2_player2_id)}</div>
+        <div className="gamePair gamePairRight"><PlayerName name={playerName(game.t2_player1_id)} onSelect={openPlayerDashboard} /> / <PlayerName name={playerName(game.t2_player2_id)} onSelect={openPlayerDashboard} /></div>
         <div className="row gameActions">
           <button className="btn green" onClick={() => saveGameScore(game.id)}>Save</button>
           <button className="btn secondary" onClick={() => resetGameScore(game.id)}>Clear</button>
@@ -1581,7 +1738,7 @@ export default function App() {
       <div className="scoreSearchResult" key={game.id}>
         <div className="gameContext">
           <b>
-            Slot {gameMatch?.slot ?? '-'} · Court {gameMatch?.court ?? '-'} · Game {game.game_number}
+            Set {gameMatch?.set_number ?? '-'} · Slot {gameMatch?.slot ?? '-'} · Court {gameMatch?.court ?? '-'} · Game {game.game_number}
           </b>
           <span className="muted">
             {team(gameMatch?.team1_id)?.emoji} {team(gameMatch?.team1_id)?.name || '-'}
@@ -1954,7 +2111,7 @@ export default function App() {
     });
 
     return Object.values(stats)
-      .map((x) => ({ ...x, pointDiff: x.pointsFor - x.pointsAgainst, team: { ...x.team, playersText: teamMembersText(x.team.id) } }))
+      .map((x) => ({ ...x, pointDiff: x.pointsFor - x.pointsAgainst, team: { ...x.team, teamPlayersList: playersForTeam(x.team.id) } }))
       .sort((a, b) => b.matchWins - a.matchWins || b.pointDiff - a.pointDiff || b.pointsFor - a.pointsFor);
   }, [teams, matches, games, scores]);
 
@@ -2104,7 +2261,7 @@ export default function App() {
               <tbody>
                 {players.map((p) => (
                   <tr key={p.id}>
-                    <td>{p.name}</td>
+                    <td><PlayerName name={p.name} onSelect={openPlayerDashboard} /></td>
                     <td style={{ width: 120 }}><button className="btn danger" onClick={() => removePlayer(p)}><Trash2 size={16} /></button></td>
                   </tr>
                 ))}
@@ -2127,7 +2284,7 @@ export default function App() {
               <tbody>
                 {regularPlayers.map((r) => (
                   <tr key={r.id}>
-                    <td>{r.name}</td>
+                    <td><PlayerName name={r.name} onSelect={openPlayerDashboard} /></td>
                     <td style={{ width: 120 }}><button className="btn danger" onClick={() => removeRegularPlayer(r)}><Trash2 size={16} /></button></td>
                   </tr>
                 ))}
@@ -2192,12 +2349,33 @@ export default function App() {
             )}
 
             <h2>Current Teams</h2>
-            {teams.map((t) => (
-              <div className="card" key={t.id} style={{ borderLeft: `5px solid ${t.color}` }}>
-                <h3>{t.emoji} {t.name}</h3>
-                <p>{playersForTeam(t.id).map((p) => p.name).join(', ')}</p>
-              </div>
-            ))}
+            {Object.entries(
+              teams.reduce((acc, t) => {
+                const setNumber = t.set_number || 1;
+                if (!acc[setNumber]) acc[setNumber] = [];
+                acc[setNumber].push(t);
+                return acc;
+              }, {})
+            )
+              .sort(([a], [b]) => Number(a) - Number(b))
+              .map(([setNumber, setTeams]) => (
+                <div key={setNumber} className="setGroup">
+                  <div className="row setGroupHeader">
+                    <h3>Set {setNumber}</h3>
+                    <button className="btn danger" onClick={() => deleteSet(Number(setNumber))}>Delete This Set</button>
+                  </div>
+                  {setTeams.map((t) => (
+                    <div className="card" key={t.id} style={{ borderLeft: `5px solid ${t.color}` }}>
+                      <h3>{t.emoji} {t.name}</h3>
+                      <p>
+                        {playersForTeam(t.id).map((p, i) => (
+                          <span key={p.id}>{i > 0 && ', '}<PlayerName name={p.name} onSelect={openPlayerDashboard} /></span>
+                        ))}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ))}
           </div>
         )}
 
@@ -2224,7 +2402,7 @@ export default function App() {
                       <option value="">Select Team 1</option>
                       {teams.map((item) => (
                         <option key={item.id} value={item.id}>
-                          {item.emoji} {item.name} — {teamMembersText(item.id)}
+                          Set {item.set_number || 1} · {item.emoji} {item.name} — {teamMembersText(item.id)}
                         </option>
                       ))}
                     </select>
@@ -2243,7 +2421,7 @@ export default function App() {
                           value={item.id}
                           disabled={item.id === quickTeam1Id}
                         >
-                          {item.emoji} {item.name} — {teamMembersText(item.id)}
+                          Set {item.set_number || 1} · {item.emoji} {item.name} — {teamMembersText(item.id)}
                         </option>
                       ))}
                     </select>
@@ -2263,7 +2441,7 @@ export default function App() {
                     <div className="row quickMatchHeader">
                       <div>
                         <b>
-                          Slot {quickSelectedMatch.slot} · Court {quickSelectedMatch.court}
+                          Set {quickSelectedMatch.set_number ?? 1} · Slot {quickSelectedMatch.slot} · Court {quickSelectedMatch.court}
                         </b>
                         <div className="muted">
                           {team(quickSelectedMatch.team1_id)?.name} vs {team(quickSelectedMatch.team2_id)?.name}
@@ -2340,29 +2518,43 @@ export default function App() {
             <h2>Full Match Schedule</h2>
             <p className="muted">The original individual-game score entry remains available below.</p>
 
-            {matches.map((match) => (
-              <div className="card" key={match.id}>
-                <div className="row">
-                  <h3>
-                    Slot {match.slot} · Court {match.court} · {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
-                  </h3>
-                  <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
-                    Reset Match Scores
-                  </button>
-                </div>
+            {Object.entries(
+              matches.reduce((acc, m) => {
+                const setNumber = m.set_number || 1;
+                if (!acc[setNumber]) acc[setNumber] = [];
+                acc[setNumber].push(m);
+                return acc;
+              }, {})
+            )
+              .sort(([a], [b]) => Number(a) - Number(b))
+              .map(([setNumber, setMatches]) => (
+                <div key={setNumber} className="setGroup">
+                  <h3>Set {setNumber}</h3>
+                  {setMatches.map((match) => (
+                    <div className="card" key={match.id}>
+                      <div className="row">
+                        <h3>
+                          Slot {match.slot} · Court {match.court} · {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
+                        </h3>
+                        <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
+                          Reset Match Scores
+                        </button>
+                      </div>
 
-                <div className="teamVsBlock">
-                  <TeamLabel teamId={match.team1_id} />
-                  <div className="scoreBig">VS</div>
-                  <TeamLabel teamId={match.team2_id} />
-                </div>
+                      <div className="teamVsBlock">
+                        <TeamLabel teamId={match.team1_id} />
+                        <div className="scoreBig">VS</div>
+                        <TeamLabel teamId={match.team2_id} />
+                      </div>
 
-                {games
-                  .filter((game) => game.match_id === match.id)
-                  .sort((a, b) => a.game_number - b.game_number)
-                  .map((game) => renderGameScoreEditor(game))}
-              </div>
-            ))}
+                      {games
+                        .filter((game) => game.match_id === match.id)
+                        .sort((a, b) => a.game_number - b.game_number)
+                        .map((game) => renderGameScoreEditor(game))}
+                    </div>
+                  ))}
+                </div>
+              ))}
           </div>
         )}
 
@@ -2421,9 +2613,9 @@ export default function App() {
         )}
 
 
-        {tab === 'team' && <Standings rows={teamStandings} type="team" />}
-        {tab === 'playersStand' && <Standings rows={playerStandings} type="player" />}
-        {tab === 'rankings' && <RankingsStandings rows={rankingRows} onRefresh={loadLeagueRankings} />}
+        {tab === 'team' && <Standings rows={teamStandings} type="team" onSelectPlayer={openPlayerDashboard} />}
+        {tab === 'playersStand' && <Standings rows={playerStandings} type="player" onSelectPlayer={openPlayerDashboard} />}
+        {tab === 'rankings' && <RankingsStandings rows={rankingRows} onRefresh={loadLeagueRankings} onSelectPlayer={openPlayerDashboard} />}
 
 
         {tab === 'overall' && (
@@ -2441,7 +2633,7 @@ export default function App() {
               <button className="btn danger" onClick={clearOverallLeaderboard}>Clear Leaderboard</button>
             </div>
 
-            <Standings rows={overallRows} type="player" />
+            <Standings rows={overallRows} type="player" onSelectPlayer={openPlayerDashboard} />
           </div>
         )}
 
@@ -2468,11 +2660,24 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {selectedPlayerName && (
+        <PlayerDashboardModal
+          row={rankingRows.find((r) => r.normalizedName === selectedPlayerName)}
+          rank={rankingRows.findIndex((r) => r.normalizedName === selectedPlayerName) + 1}
+          onClose={() => setSelectedPlayerName(null)}
+        />
+      )}
     </div>
   );
 }
 
-function Standings({ rows, type }) {
+function PlayerName({ name, onSelect }) {
+  if (!name) return <span>-</span>;
+  return <button type="button" className="playerNameLink" onClick={() => onSelect(name)}>{name}</button>;
+}
+
+function Standings({ rows, type, onSelectPlayer }) {
   return (
     <div className="card">
       <h2>Standings</h2>
@@ -2491,7 +2696,13 @@ function Standings({ rows, type }) {
                     <div className="pill" style={{ background: `${s.team.color}33`, color: s.team.color }}>
                       {s.team.emoji} {s.team.name}
                     </div>
-                    <div className="teamMembers">{s.team.playersText || 'No players assigned'}</div>
+                    <div className="teamMembers">
+                      {s.team.teamPlayersList?.length
+                        ? s.team.teamPlayersList.map((p, i2) => (
+                          <span key={p.id}>{i2 > 0 && ' · '}<PlayerName name={p.name} onSelect={onSelectPlayer} /></span>
+                        ))
+                        : 'No players assigned'}
+                    </div>
                   </td>
                 <td>{s.matchWins}</td>
                 <td>{s.gameWins}</td>
@@ -2511,7 +2722,7 @@ function Standings({ rows, type }) {
             {rows.map((s, i) => (
               <tr key={s.id ?? s.player}>
                 <td>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i + 1}</td>
-                <td><b>{s.player}</b></td>
+                <td><b><PlayerName name={s.player} onSelect={onSelectPlayer} /></b></td>
                 <td>{s.played}</td>
                 <td>{s.wins}</td>
                 <td>{s.losses}</td>
@@ -2528,7 +2739,7 @@ function Standings({ rows, type }) {
   );
 }
 
-function RankingsStandings({ rows, onRefresh }) {
+function RankingsStandings({ rows, onRefresh, onSelectPlayer }) {
   return (
     <div className="card">
       <h2>Rankings</h2>
@@ -2551,7 +2762,7 @@ function RankingsStandings({ rows, onRefresh }) {
           {rows.map((s, i) => (
             <tr key={s.normalizedName}>
               <td>{i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : i + 1}</td>
-              <td><b>{s.displayName}</b></td>
+              <td><b><PlayerName name={s.displayName} onSelect={onSelectPlayer} /></b></td>
               <td className={s.streak > 0 ? 'streakPos' : s.streak < 0 ? 'streakNeg' : ''}>
                 {s.streak > 0 ? `W${s.streak}` : s.streak < 0 ? `L${Math.abs(s.streak)}` : '–'}
               </td>
@@ -2566,6 +2777,68 @@ function RankingsStandings({ rows, onRefresh }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function PlayerDashboardModal({ row, rank, onClose }) {
+  return (
+    <div className="modalOverlay" onClick={onClose}>
+      <div className="modalCard card" onClick={(e) => e.stopPropagation()}>
+        <div className="row" style={{ justifyContent: 'space-between' }}>
+          <h2>{row?.displayName || 'Player'}</h2>
+          <button className="btn secondary" onClick={onClose}>Close</button>
+        </div>
+
+        {!row ? (
+          <div className="emptyState">No game history yet.</div>
+        ) : (
+          <>
+            <div className="grid stats">
+              <div className="card stat"><div><span className="muted">Rank</span><b>{rank > 0 ? `#${rank}` : '-'}</b></div></div>
+              <div className="card stat"><div><span className="muted">Rank Score</span><b>{row.rankScore.toFixed(1)}</b></div></div>
+              <div className="card stat"><div><span className="muted">Streak</span><b className={row.streak > 0 ? 'streakPos' : row.streak < 0 ? 'streakNeg' : ''}>{row.streak > 0 ? `W${row.streak}` : row.streak < 0 ? `L${Math.abs(row.streak)}` : '–'}</b></div></div>
+              <div className="card stat"><div><span className="muted">Games</span><b>{row.gamesPlayed}</b></div></div>
+            </div>
+
+            <h3>Win % by Week</h3>
+            <table>
+              <thead>
+                <tr><th>Week</th><th>Wins</th><th>Losses</th><th>Win %</th></tr>
+              </thead>
+              <tbody>
+                {row.perWeekBreakdown.map((w, i) => (
+                  <tr key={i}>
+                    <td>{w.weekName}</td>
+                    <td>{w.wins}</td>
+                    <td>{w.losses}</td>
+                    <td>{w.winPct}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <h3>Game History</h3>
+            <table>
+              <thead>
+                <tr><th>Week</th><th>Set</th><th>Teammate</th><th>Opponents</th><th>Score</th><th>Result</th></tr>
+              </thead>
+              <tbody>
+                {row.gameLog.map((g, i) => (
+                  <tr key={i}>
+                    <td>{g.weekName}</td>
+                    <td>{g.setNumber}</td>
+                    <td>{g.teammateName || '-'}</td>
+                    <td>{g.opponentNames.join(' / ')}</td>
+                    <td>{g.playerScore}-{g.opponentScore}</td>
+                    <td className={g.result === 'W' ? 'streakPos' : g.result === 'L' ? 'streakNeg' : ''}>{g.result}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </>
+        )}
+      </div>
     </div>
   );
 }

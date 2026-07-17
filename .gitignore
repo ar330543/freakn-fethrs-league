@@ -25,3 +25,5 @@ yarn-error.log*
 
 # Supabase CLI local project-link cache
 supabase/.temp/
+.vercel
+.env*

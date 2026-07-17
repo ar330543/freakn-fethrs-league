@@ -213,3 +213,36 @@ drop policy if exists "public all regular_players" on regular_players;
 create policy "public all regular_players" on regular_players for all using (true) with check (true);
 
 do $$ begin alter publication supabase_realtime add table regular_players; exception when duplicate_object then null; end $$;
+
+
+
+-- V20 non-destructive multi-set weeks
+alter table teams add column if not exists set_number int not null default 1;
+alter table matches add column if not exists set_number int not null default 1;
+
+
+
+-- V21 scope undo_last_score to a single week (previously unscoped across the whole database)
+drop function if exists undo_last_score();
+create or replace function undo_last_score(p_week_id uuid)
+returns void as $$
+declare h score_history%rowtype;
+begin
+  select sh.* into h
+  from score_history sh
+  join match_games mg on mg.id = sh.game_id
+  join matches m on m.id = mg.match_id
+  where m.week_id = p_week_id
+  order by sh.created_at desc
+  limit 1;
+
+  if h.id is null then return; end if;
+
+  insert into game_scores(game_id, score1, score2, updated_at)
+  values (h.game_id, h.old_score1, h.old_score2, now())
+  on conflict(game_id) do update
+  set score1 = h.old_score1, score2 = h.old_score2, updated_at = now();
+
+  delete from score_history where id = h.id;
+end;
+$$ language plpgsql security definer;
