@@ -10,6 +10,16 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 );
 
+const STAGE_ORDER = ['league', 'knockout', 'semifinal', 'playoffs', 'grand_final', 'bronze'];
+const STAGE_LABELS = {
+  league: 'League',
+  knockout: 'Knockouts',
+  semifinal: 'Semifinals',
+  playoffs: 'Playoffs',
+  grand_final: 'Grand Final',
+  bronze: 'Bronze Medal Match',
+};
+
 const teamColors = [
   ['Red', '🔴', '#ef4444'],
   ['Blue', '🔵', '#38bdf8'],
@@ -61,6 +71,49 @@ function validatePlayersPerTeam(playerCount, playersPerTeam) {
 }
 
 
+function getMatchResult(match, games, scores) {
+  let aw = 0, bw = 0, ap = 0, bp = 0, done = 0;
+
+  games.filter((g) => g.match_id === match.id).forEach((game) => {
+    const score = scores.find((s) => s.game_id === game.id) || {};
+    if (score.score1 == null || score.score2 == null) return;
+    const a = Number(score.score1);
+    const b = Number(score.score2);
+    done++;
+    ap += a;
+    bp += b;
+    if (a > b) aw++;
+    else if (b > a) bw++;
+  });
+
+  const isDraw = done > 0 && aw === bw;
+  let winnerTeamId = null;
+  let loserTeamId = null;
+  if (done > 0 && !isDraw) {
+    winnerTeamId = aw > bw ? match.team1_id : match.team2_id;
+    loserTeamId = aw > bw ? match.team2_id : match.team1_id;
+  }
+
+  return { aw, bw, ap, bp, done, winnerTeamId, loserTeamId, isDraw };
+}
+
+// A bracket-stage match is "complete" (safe to advance past) once every one
+// of its games has a score and the result isn't a draw — stricter than
+// teamStandings' "done" check, which only requires at least one scored game.
+function matchIsComplete(match, games, scores) {
+  const matchGames = games.filter((g) => g.match_id === match.id);
+  if (!matchGames.length) return false;
+
+  const allScored = matchGames.every((g) => {
+    const score = scores.find((s) => s.game_id === g.id) || {};
+    return score.score1 != null && score.score2 != null;
+  });
+  if (!allScored) return false;
+
+  return !getMatchResult(match, games, scores).isDraw;
+}
+
+
 function generateRoundRobinRounds(teamList) {
   const teams = [...teamList];
   if (teams.length % 2 === 1) teams.push(null);
@@ -84,6 +137,38 @@ function generateRoundRobinRounds(teamList) {
     teams.splice(0, teams.length, ...rotated);
   }
 
+  return rounds;
+}
+
+
+// Complete bipartite round robin: every clubA team plays every clubB team
+// exactly once, spread across max(aCount,bCount) rounds with no team playing
+// twice in the same round. WLOG treat whichever club has fewer teams as
+// "small" (size s) and the other as "big" (size L=max). Round r pairs
+// small[i] with big[(i+r) % L] for i in 0..s-1 — s distinct small teams and s
+// distinct big teams every round (a "big" team sits out when L > s), and as r
+// ranges over 0..L-1 every (small[i], big[j]) combination occurs exactly once.
+function generateBipartiteRounds(clubATeams, clubBTeams) {
+  const aCount = clubATeams.length;
+  const bCount = clubBTeams.length;
+  if (!aCount || !bCount) return [];
+
+  const aIsSmaller = aCount <= bCount;
+  const small = aIsSmaller ? clubATeams : clubBTeams;
+  const big = aIsSmaller ? clubBTeams : clubATeams;
+  const L = big.length;
+  const s = small.length;
+
+  const rounds = [];
+  for (let r = 0; r < L; r++) {
+    const roundPairs = [];
+    for (let i = 0; i < s; i++) {
+      const smallTeam = small[i];
+      const bigTeam = big[(i + r) % L];
+      roundPairs.push(aIsSmaller ? [smallTeam, bigTeam] : [bigTeam, smallTeam]);
+    }
+    rounds.push(roundPairs);
+  }
   return rounds;
 }
 
@@ -653,6 +738,23 @@ async function deleteSetRows(weekId, setNumber) {
   if (delErr) throw delErr;
 }
 
+// Bracket-stage matches (knockout/semifinal/playoffs/grand_final/bronze)
+// reuse existing league teams rather than creating new ones, so — unlike
+// deleteSetRows — there's nothing team-scoped to delete. Powers a "Redo this
+// stage" action, gated in the UI on the next stage not existing yet.
+async function deleteStageMatches(weekId, stage) {
+  const { data: matchRows } = await supabase.from('matches').select('id').eq('week_id', weekId).eq('stage', stage);
+  const matchIds = (matchRows || []).map((m) => m.id);
+
+  if (matchIds.length) {
+    const { data: gameRows } = await supabase.from('match_games').select('id').in('match_id', matchIds);
+    await deleteScoreHistoryForGames((gameRows || []).map((g) => g.id));
+  }
+
+  const { error: delErr } = await supabase.from('matches').delete().eq('week_id', weekId).eq('stage', stage);
+  if (delErr) throw delErr;
+}
+
 function buildSkillBalancedTeams(teamPlayers, count, forbiddenPairs, rankScoreByNormalizedName) {
   const normalizedNames = teamPlayers.map((player) => normalizePlayerName(player.name));
   const duplicates = normalizedNames.filter((name, index) => normalizedNames.indexOf(name) !== index);
@@ -765,6 +867,7 @@ export default function App() {
   const [leagues, setLeagues] = useState([]);
   const [weeks, setWeeks] = useState([]);
   const [players, setPlayers] = useState([]);
+  const [clubs, setClubs] = useState([]);
   const [teams, setTeams] = useState([]);
   const [teamPlayers, setTeamPlayers] = useState([]);
   const [matches, setMatches] = useState([]);
@@ -794,6 +897,17 @@ export default function App() {
   const [opponentNames, setOpponentNames] = useState('');
   const [interClubMode, setInterClubMode] = useState('auto');
   const [manualCourts, setManualCourts] = useState([]);
+  const [clubANameDraft, setClubANameDraft] = useState('');
+  const [clubBNameDraft, setClubBNameDraft] = useState('');
+  const [clubARosterText, setClubARosterText] = useState('');
+  const [clubBRosterText, setClubBRosterText] = useState('');
+  const [clubManual, setClubManual] = useState({});
+  const [knockoutQualifierCountDraft, setKnockoutQualifierCountDraft] = useState('');
+  const [knockoutOverrides, setKnockoutOverrides] = useState({});
+  const [semifinalOverrides, setSemifinalOverrides] = useState({});
+  const [grandFinalOverride, setGrandFinalOverride] = useState({});
+  const [bronzeOverride, setBronzeOverride] = useState({});
+  const [playoffsOverrides, setPlayoffsOverrides] = useState({});
 
   const league = leagues.find((l) => l.id === leagueId);
   const week = weeks.find((w) => w.id === weekId);
@@ -872,6 +986,7 @@ export default function App() {
       .on('postgres_changes', { event: '*', schema: 'public', table: 'leagues' }, () => loadLeagues(false))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'weeks' }, () => loadWeeks(false))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'players' }, () => loadWeekData())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clubs' }, () => loadWeekData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'teams' }, () => loadWeekData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'team_players' }, () => loadWeekData())
       .on('postgres_changes', { event: '*', schema: 'public', table: 'matches' }, () => loadWeekData())
@@ -893,6 +1008,7 @@ export default function App() {
 
   function clearWeekData() {
     setPlayers([]);
+    setClubs([]);
     setTeams([]);
     setTeamPlayers([]);
     setMatches([]);
@@ -1084,8 +1200,9 @@ export default function App() {
       return;
     }
 
-    const [p, t, tp, m, g, s] = await Promise.all([
+    const [p, c, t, tp, m, g, s] = await Promise.all([
       supabase.from('players').select('*').eq('week_id', weekId).order('created_at'),
+      supabase.from('clubs').select('*').eq('week_id', weekId).order('created_at'),
       supabase.from('teams').select('*').eq('week_id', weekId).order('created_at'),
       supabase.from('team_players').select('*'),
       supabase.from('matches').select('*').eq('week_id', weekId).order('slot').order('court'),
@@ -1094,6 +1211,7 @@ export default function App() {
     ]);
 
     setPlayers(p.data || []);
+    setClubs(c.data || []);
     setTeams(t.data || []);
     setTeamPlayers(tp.data || []);
     setMatches(m.data || []);
@@ -1194,6 +1312,41 @@ export default function App() {
     });
   }
 
+  async function createClub(name, clearDraft) {
+    if (!weekId) return fail('No week is selected.');
+    const trimmed = name.trim();
+    if (!trimmed) return fail('Enter a club name.');
+    if (clubs.length >= 2) return fail('Only two clubs are supported for an Inter-Club League week.');
+
+    await act(async () => {
+      const { error: err } = await supabase.from('clubs').insert({ week_id: weekId, name: trimmed });
+      if (err) throw err;
+      clearDraft();
+    });
+  }
+
+  async function removeClub(club) {
+    if (!confirm(`Remove ${club.name}? This removes its players, teams, and matches for this week.`)) return;
+    await act(async () => {
+      const { error: err } = await supabase.from('clubs').delete().eq('id', club.id);
+      if (err) throw err;
+    });
+  }
+
+  async function addClubPlayers(clubId, namesText, clearDraft) {
+    if (!weekId) return fail('No week is selected. Create or select a week before adding players.');
+    const arr = namesText.split('\n').map((x) => x.trim()).filter(Boolean);
+    if (!arr.length) return fail('Paste at least one player name.');
+
+    await act(async () => {
+      const { error: err } = await supabase
+        .from('players')
+        .upsert(arr.map((name) => ({ week_id: weekId, club_id: clubId, name })), { onConflict: 'week_id,club_id,name' });
+      if (err) throw err;
+      clearDraft();
+    });
+  }
+
   async function addRegularPlayers() {
     if (!leagueId) return fail('No league is selected.');
     const arr = regularNames.split('\n').map((x) => x.trim()).filter(Boolean);
@@ -1278,7 +1431,7 @@ export default function App() {
       const { data: newWeekRow, error: err } = await supabase.from('weeks').insert({ league_id: leagueId, name }).select().single();
       if (err) throw err;
       setWeekId(newWeekRow.id);
-      setTab('teams');
+      setTab('players');
     });
   }
 
@@ -1302,6 +1455,18 @@ export default function App() {
         const { error: delErr } = await supabase
           .from('players').delete().eq('week_id', weekId).eq('is_opponent', true);
         if (delErr) throw delErr;
+      }
+
+      if (format !== 'inter_club_league') {
+        // Switching away from (or never having been) an inter-club-league
+        // week — clean up any club-tagged players/clubs so nothing is
+        // orphaned if the organizer picked this format and then changed
+        // their mind before adding teams.
+        const { error: clubPlayersErr } = await supabase
+          .from('players').delete().eq('week_id', weekId).not('club_id', 'is', null);
+        if (clubPlayersErr) throw clubPlayersErr;
+        const { error: clubsErr } = await supabase.from('clubs').delete().eq('week_id', weekId);
+        if (clubsErr) throw clubsErr;
       }
 
       const { error: err } = await supabase.from('weeks').update({ format }).eq('id', weekId);
@@ -1378,16 +1543,19 @@ export default function App() {
     });
   }
 
-  async function buildTeamsAndSchedule(teamDefs, targetSetNumber, mode) {
+  async function insertTeamsWithPlayers(teamDefs, targetSetNumber, extraTeamFields) {
     if (teamDefs.some((t) => t.players.length < 2)) throw new Error('Every team must have at least 2 players.');
-
-    if (mode === 'replace') {
-      await deleteSetRows(weekId, targetSetNumber);
-    }
 
     const { data: insertedTeams, error: tErr } = await supabase
       .from('teams')
-      .insert(teamDefs.map((t) => ({ week_id: weekId, set_number: targetSetNumber, name: t.name, emoji: t.emoji, color: t.color })))
+      .insert(teamDefs.map((t) => ({
+        week_id: weekId,
+        set_number: targetSetNumber,
+        name: t.name,
+        emoji: t.emoji,
+        color: t.color,
+        ...(extraTeamFields ? extraTeamFields(t) : null),
+      })))
       .select();
     if (tErr) throw tErr;
 
@@ -1397,37 +1565,40 @@ export default function App() {
     const { error: linkErr } = await supabase.from('team_players').insert(links);
     if (linkErr) throw linkErr;
 
-    const matchRows = [];
-    const rounds = generateRoundRobinRounds(insertedTeams);
+    return insertedTeams.map((team, i) => ({ team, players: teamDefs[i].players }));
+  }
 
-    rounds.forEach((roundPairs, roundIndex) => {
-      roundPairs.forEach(([teamA, teamB], courtIndex) => {
-        matchRows.push({
-          week_id: weekId,
-          set_number: targetSetNumber,
-          slot: roundIndex + 1,
-          court: String.fromCharCode(65 + courtIndex),
-          team1_id: teamA.id,
-          team2_id: teamB.id,
-        });
-      });
-    });
+  // Batches match + match_games creation for one or many team pairs in exactly
+  // two inserts, regardless of pair count — used both for whole-schedule
+  // generation (round robin, cross-club league) and for single/small-batch
+  // bracket-stage matches. Game count (1 vs 3) is decided per pair, since
+  // inter-club-league teams from different clubs can have different sizes.
+  async function createMatchesForPairs(pairEntries) {
+    const matchRows = pairEntries.map((entry) => ({
+      week_id: weekId,
+      set_number: entry.setNumber ?? 1,
+      slot: entry.slot,
+      court: entry.court,
+      team1_id: entry.teamA.id,
+      team2_id: entry.teamB.id,
+      stage: entry.stage || 'league',
+      bracket_order: entry.bracketOrder ?? null,
+      label: entry.label ?? null,
+    }));
 
     const { data: insertedMatches, error: mErr } = await supabase.from('matches').insert(matchRows).select();
     if (mErr) throw mErr;
 
-    const teamMap = Object.fromEntries(insertedTeams.map((t, i) => [t.id, teamDefs[i].players]));
     const gameRows = [];
-
-    const isTwoPlayerTeamFormat = teamDefs.every((teamDef) => teamDef.players.length === 2);
-    const gamesPerTeamMatch = isTwoPlayerTeamFormat ? 1 : 3;
-
-    insertedMatches.forEach((match) => {
-      const t1Pairs = randomizedPairOrder(teamMap[match.team1_id]);
-      const t2Pairs = randomizedPairOrder(teamMap[match.team2_id]);
+    insertedMatches.forEach((match, i) => {
+      const entry = pairEntries[i];
+      const t1Pairs = randomizedPairOrder(entry.teamAPlayers);
+      const t2Pairs = randomizedPairOrder(entry.teamBPlayers);
       if (!t1Pairs.length || !t2Pairs.length) throw new Error('Cannot create doubles games because a team has fewer than 2 players.');
 
-      Array.from({ length: gamesPerTeamMatch }, (_, n) => n).forEach((n) => {
+      const gamesPerMatch = entry.teamAPlayers.length === 2 && entry.teamBPlayers.length === 2 ? 1 : 3;
+
+      Array.from({ length: gamesPerMatch }, (_, n) => n).forEach((n) => {
         gameRows.push({
           match_id: match.id,
           game_number: n + 1,
@@ -1441,6 +1612,41 @@ export default function App() {
 
     const { error: gErr } = await supabase.from('match_games').insert(gameRows);
     if (gErr) throw gErr;
+
+    return insertedMatches;
+  }
+
+  async function createMatchForTeamPair(teamA, teamAPlayers, teamB, teamBPlayers, opts) {
+    const [match] = await createMatchesForPairs([{ teamA, teamAPlayers, teamB, teamBPlayers, ...opts }]);
+    return match;
+  }
+
+  async function buildTeamsAndSchedule(teamDefs, targetSetNumber, mode) {
+    if (teamDefs.some((t) => t.players.length < 2)) throw new Error('Every team must have at least 2 players.');
+
+    if (mode === 'replace') {
+      await deleteSetRows(weekId, targetSetNumber);
+    }
+
+    const inserted = await insertTeamsWithPlayers(teamDefs, targetSetNumber);
+    const byTeamId = Object.fromEntries(inserted.map((x) => [x.team.id, x.players]));
+    const rounds = generateRoundRobinRounds(inserted.map((x) => x.team));
+
+    const pairEntries = [];
+    rounds.forEach((roundPairs, roundIndex) => {
+      roundPairs.forEach(([teamA, teamB], courtIndex) => {
+        pairEntries.push({
+          teamA, teamAPlayers: byTeamId[teamA.id],
+          teamB, teamBPlayers: byTeamId[teamB.id],
+          setNumber: targetSetNumber,
+          slot: roundIndex + 1,
+          court: String.fromCharCode(65 + courtIndex),
+          stage: 'league',
+        });
+      });
+    });
+
+    await createMatchesForPairs(pairEntries);
   }
 
   async function commitInterClubCourts(courtPairs) {
@@ -1694,7 +1900,7 @@ export default function App() {
       .from('weeks')
       .select('id, name, created_at, format')
       .eq('league_id', leagueId);
-    if (excludeInterClub) query = query.neq('format', 'inter_club');
+    if (excludeInterClub) query = query.not('format', 'in', '(inter_club,inter_club_league)');
     const { data, error: err } = await query;
     if (err) throw err;
     return data || [];
@@ -1984,6 +2190,282 @@ export default function App() {
     });
   }
 
+  function getClubManual(clubId) {
+    return clubManual[clubId] || { teamCount: 2, assignments: {} };
+  }
+
+  function setClubManualTeamCount(clubId, teamCount) {
+    setClubManual((prev) => ({ ...prev, [clubId]: { ...(prev[clubId] || { teamCount: 2, assignments: {} }), teamCount } }));
+  }
+
+  function setClubManualAssign(clubId, playerId, teamIndex) {
+    setClubManual((prev) => {
+      const current = prev[clubId] || { teamCount: 2, assignments: {} };
+      return { ...prev, [clubId]: { ...current, assignments: { ...current.assignments, [playerId]: teamIndex } } };
+    });
+  }
+
+  async function saveManualTeamsForClub(club) {
+    if (!weekId) return fail('No week is selected.');
+    const hasLeagueSchedule = matches.some((m) => (m.stage || 'league') === 'league');
+    if (hasLeagueSchedule) return fail('Teams are locked once the league schedule has been generated.');
+
+    const clubPlayers = players.filter((p) => p.club_id === club.id);
+    const { teamCount: teamCountRaw, assignments } = getClubManual(club.id);
+    const count = Number(teamCountRaw);
+    const validation = validateTeamAsk(clubPlayers.length, count);
+    if (validation) return fail(validation);
+
+    const assignedIds = Object.keys(assignments).filter(
+      (pid) => assignments[pid] !== '' && assignments[pid] != null && clubPlayers.some((p) => p.id === pid)
+    );
+    if (assignedIds.length !== clubPlayers.length) {
+      return fail(`Assign all of ${club.name}'s players before saving. ${clubPlayers.length - assignedIds.length} unassigned.`);
+    }
+
+    const defs = Array.from({ length: count }, (_, i) => ({
+      name: `${club.name} ${teamColors[i % teamColors.length][0]}`,
+      emoji: teamColors[i % teamColors.length][1],
+      color: teamColors[i % teamColors.length][2],
+      players: [],
+    }));
+
+    clubPlayers.forEach((p) => defs[Number(assignments[p.id])].players.push(p));
+    const smallTeam = defs.find((t) => t.players.length < 2);
+    if (smallTeam) return fail(`${smallTeam.name} has fewer than 2 players.`);
+
+    await act(async () => {
+      const existingClubTeamIds = teams.filter((t) => t.club_id === club.id).map((t) => t.id);
+      if (existingClubTeamIds.length) {
+        const { error: delErr } = await supabase.from('teams').delete().in('id', existingClubTeamIds);
+        if (delErr) throw delErr;
+      }
+      await insertTeamsWithPlayers(defs, 1, () => ({ club_id: club.id }));
+    });
+  }
+
+  async function generateLeagueSchedule() {
+    if (!weekId) return fail('No week is selected.');
+    if (clubs.length < 2) return fail('Add both clubs before generating the league schedule.');
+
+    const [clubA, clubB] = clubs;
+    const clubATeams = teams.filter((t) => t.club_id === clubA.id);
+    const clubBTeams = teams.filter((t) => t.club_id === clubB.id);
+    if (!clubATeams.length || !clubBTeams.length) {
+      return fail('Both clubs need at least one team before generating the league schedule.');
+    }
+
+    const hasLeagueMatches = matches.some((m) => (m.stage || 'league') === 'league');
+    if (hasLeagueMatches) return fail('The league schedule has already been generated for this week.');
+
+    await act(async () => {
+      const byTeamId = Object.fromEntries(teams.map((t) => [t.id, playersForTeam(t.id)]));
+      const rounds = generateBipartiteRounds(clubATeams, clubBTeams);
+
+      const pairEntries = [];
+      rounds.forEach((roundPairs, roundIndex) => {
+        roundPairs.forEach(([teamA, teamB], courtIndex) => {
+          pairEntries.push({
+            teamA, teamAPlayers: byTeamId[teamA.id],
+            teamB, teamBPlayers: byTeamId[teamB.id],
+            setNumber: 1,
+            slot: roundIndex + 1,
+            court: String.fromCharCode(65 + courtIndex),
+            stage: 'league',
+          });
+        });
+      });
+
+      await createMatchesForPairs(pairEntries);
+    });
+  }
+
+  async function chooseKnockouts(choice) {
+    if (!weekId) return fail('No week is selected.');
+    await act(async () => {
+      const { error: err } = await supabase.from('weeks').update({ knockouts_choice: choice }).eq('id', weekId);
+      if (err) throw err;
+      await loadWeeks(false);
+    });
+  }
+
+  function setKnockoutOverride(seedIndex, side, teamId) {
+    setKnockoutOverrides((prev) => ({
+      ...prev,
+      [seedIndex]: { ...(prev[seedIndex] || {}), [side]: teamId },
+    }));
+  }
+
+  async function confirmKnockoutMatches() {
+    if (!weekId) return fail('No week is selected.');
+    const n = knockoutQualifierCount;
+    if (!n || n % 2 !== 0 || n < 2) return fail('Qualifier count must be an even number of at least 2.');
+    if (n > teamStandings.length) return fail(`Only ${teamStandings.length} teams played the league stage.`);
+    if (knockoutSeedPairs.some((p) => !p.team1 || !p.team2)) return fail('Every knockout matchup needs two teams.');
+    if (knockoutSeedPairs.some((p) => p.team1.id === p.team2.id)) return fail('A knockout matchup cannot have the same team on both sides.');
+
+    await act(async () => {
+      const byTeamId = Object.fromEntries(teams.map((t) => [t.id, playersForTeam(t.id)]));
+      const pairEntries = knockoutSeedPairs.map((p) => ({
+        teamA: p.team1, teamAPlayers: byTeamId[p.team1.id],
+        teamB: p.team2, teamBPlayers: byTeamId[p.team2.id],
+        setNumber: 1,
+        slot: p.seedIndex + 1,
+        court: String.fromCharCode(65 + p.seedIndex),
+        stage: 'knockout',
+        bracketOrder: p.seedIndex + 1,
+        label: `Knockout ${p.seedIndex + 1}`,
+      }));
+      await createMatchesForPairs(pairEntries);
+
+      const { error: err } = await supabase.from('weeks').update({ knockout_qualifier_count: n }).eq('id', weekId);
+      if (err) throw err;
+      await loadWeeks(false);
+    });
+
+    setKnockoutOverrides({});
+  }
+
+  async function redoStage(stage) {
+    if (!weekId) return fail('No week is selected.');
+    if (!confirm(`Redo the ${STAGE_LABELS[stage] || stage} stage? This deletes its matches and scores.`)) return;
+
+    await act(async () => {
+      await deleteStageMatches(weekId, stage);
+
+      if (stage === 'knockout') {
+        const { error: err } = await supabase
+          .from('weeks').update({ knockouts_choice: 'pending', bracket_format: null, knockout_qualifier_count: null })
+          .eq('id', weekId);
+        if (err) throw err;
+        await loadWeeks(false);
+      } else if (stage === 'semifinal' || stage === 'playoffs') {
+        const { error: err } = await supabase.from('weeks').update({ bracket_format: null }).eq('id', weekId);
+        if (err) throw err;
+        await loadWeeks(false);
+      }
+    });
+  }
+
+  async function chooseBracketFormat(format) {
+    if (!weekId) return fail('No week is selected.');
+    await act(async () => {
+      const { error: err } = await supabase.from('weeks').update({ bracket_format: format }).eq('id', weekId);
+      if (err) throw err;
+      await loadWeeks(false);
+    });
+  }
+
+  function setSemifinalOverride(bracketOrder, side, teamId) {
+    setSemifinalOverrides((prev) => ({ ...prev, [bracketOrder]: { ...(prev[bracketOrder] || {}), [side]: teamId } }));
+  }
+
+  async function confirmSemifinalMatches() {
+    if (!weekId) return fail('No week is selected.');
+    if (semifinalSeedPairs.length < 2) return fail('Need 4 knockout winners to seed semifinals.');
+    if (semifinalSeedPairs.some((p) => !p.team1 || !p.team2)) return fail('Every semifinal matchup needs two teams.');
+    if (semifinalSeedPairs.some((p) => p.team1.id === p.team2.id)) return fail('A semifinal matchup cannot have the same team on both sides.');
+
+    await act(async () => {
+      const byTeamId = Object.fromEntries(teams.map((t) => [t.id, playersForTeam(t.id)]));
+      const pairEntries = semifinalSeedPairs.map((p) => ({
+        teamA: p.team1, teamAPlayers: byTeamId[p.team1.id],
+        teamB: p.team2, teamBPlayers: byTeamId[p.team2.id],
+        setNumber: 1,
+        slot: p.bracketOrder,
+        court: String.fromCharCode(64 + p.bracketOrder),
+        stage: 'semifinal',
+        bracketOrder: p.bracketOrder,
+        label: p.label,
+      }));
+      await createMatchesForPairs(pairEntries);
+    });
+
+    setSemifinalOverrides({});
+  }
+
+  function setGrandFinalOverrideSide(side, teamId) {
+    setGrandFinalOverride((prev) => ({ ...prev, [side]: teamId }));
+  }
+
+  function setBronzeOverrideSide(side, teamId) {
+    setBronzeOverride((prev) => ({ ...prev, [side]: teamId }));
+  }
+
+  async function confirmGrandFinalMatch() {
+    if (!weekId) return fail('No week is selected.');
+    const pair = week?.bracket_format === 'playoffs' ? playoffsGrandFinalPair : grandFinalPair;
+    if (!pair?.team1 || !pair?.team2) return fail('Grand Final needs two teams.');
+    if (pair.team1.id === pair.team2.id) return fail('Grand Final cannot have the same team on both sides.');
+
+    await act(async () => {
+      const byTeamId = Object.fromEntries(teams.map((t) => [t.id, playersForTeam(t.id)]));
+      await createMatchForTeamPair(pair.team1, byTeamId[pair.team1.id], pair.team2, byTeamId[pair.team2.id], {
+        setNumber: 1, slot: 1, court: 'A', stage: 'grand_final', bracketOrder: 1, label: 'Grand Final',
+      });
+    });
+
+    setGrandFinalOverride({});
+  }
+
+  async function confirmBronzeMatch() {
+    if (!weekId) return fail('No week is selected.');
+    if (!bronzePair?.team1 || !bronzePair?.team2) return fail('Bronze Medal Match needs two teams.');
+    if (bronzePair.team1.id === bronzePair.team2.id) return fail('Bronze Medal Match cannot have the same team on both sides.');
+
+    await act(async () => {
+      const byTeamId = Object.fromEntries(teams.map((t) => [t.id, playersForTeam(t.id)]));
+      await createMatchForTeamPair(bronzePair.team1, byTeamId[bronzePair.team1.id], bronzePair.team2, byTeamId[bronzePair.team2.id], {
+        setNumber: 1, slot: 1, court: 'B', stage: 'bronze', bracketOrder: 1, label: 'Bronze Medal Match',
+      });
+    });
+
+    setBronzeOverride({});
+  }
+
+  function setPlayoffsOverride(bracketOrder, side, teamId) {
+    setPlayoffsOverrides((prev) => ({ ...prev, [bracketOrder]: { ...(prev[bracketOrder] || {}), [side]: teamId } }));
+  }
+
+  async function confirmQualifier1AndEliminator() {
+    if (!weekId) return fail('No week is selected.');
+    if (!playoffsQ1Pair?.team1 || !playoffsQ1Pair?.team2 || !playoffsEliminatorPair?.team1 || !playoffsEliminatorPair?.team2) {
+      return fail('Qualifier 1 and Eliminator each need two teams.');
+    }
+    if (playoffsQ1Pair.team1.id === playoffsQ1Pair.team2.id) return fail('Qualifier 1 cannot have the same team on both sides.');
+    if (playoffsEliminatorPair.team1.id === playoffsEliminatorPair.team2.id) return fail('Eliminator cannot have the same team on both sides.');
+
+    await act(async () => {
+      const byTeamId = Object.fromEntries(teams.map((t) => [t.id, playersForTeam(t.id)]));
+      const pairEntries = [
+        {
+          teamA: playoffsQ1Pair.team1, teamAPlayers: byTeamId[playoffsQ1Pair.team1.id],
+          teamB: playoffsQ1Pair.team2, teamBPlayers: byTeamId[playoffsQ1Pair.team2.id],
+          setNumber: 1, slot: 1, court: 'A', stage: 'playoffs', bracketOrder: 1, label: 'Qualifier 1',
+        },
+        {
+          teamA: playoffsEliminatorPair.team1, teamAPlayers: byTeamId[playoffsEliminatorPair.team1.id],
+          teamB: playoffsEliminatorPair.team2, teamBPlayers: byTeamId[playoffsEliminatorPair.team2.id],
+          setNumber: 1, slot: 1, court: 'B', stage: 'playoffs', bracketOrder: 2, label: 'Eliminator',
+        },
+      ];
+      await createMatchesForPairs(pairEntries);
+    });
+  }
+
+  async function confirmQualifier2Match() {
+    if (!weekId) return fail('No week is selected.');
+    if (!qualifier2Pair?.team1 || !qualifier2Pair?.team2) return fail('Qualifier 2 needs two teams.');
+    if (qualifier2Pair.team1.id === qualifier2Pair.team2.id) return fail('Qualifier 2 cannot have the same team on both sides.');
+
+    await act(async () => {
+      const byTeamId = Object.fromEntries(teams.map((t) => [t.id, playersForTeam(t.id)]));
+      await createMatchForTeamPair(qualifier2Pair.team1, byTeamId[qualifier2Pair.team1.id], qualifier2Pair.team2, byTeamId[qualifier2Pair.team2.id], {
+        setNumber: 1, slot: 1, court: 'C', stage: 'playoffs', bracketOrder: 3, label: 'Qualifier 2',
+      });
+    });
+  }
+
   function draftChange(gameId, side, value) {
     const clean = String(value).replace(/[^0-9]/g, '');
     if (clean !== '' && Number(clean) > 99) return fail('Scores must be between 0 and 99.');
@@ -2252,7 +2734,7 @@ export default function App() {
         .from('weeks')
         .select('id,name')
         .eq('league_id', leagueId)
-        .neq('format', 'inter_club');
+        .not('format', 'in', '(inter_club,inter_club_league)');
       if (wErr) throw wErr;
 
       const weekIds = (leagueWeeks || []).map((w) => w.id);
@@ -2289,7 +2771,7 @@ export default function App() {
 
   async function loadAllLeaguesOverall() {
     const { data: allWeeks, error: wErr } = await supabase
-      .from('weeks').select('id,name').neq('format', 'inter_club');
+      .from('weeks').select('id,name').not('format', 'in', '(inter_club,inter_club_league)');
     if (wErr) return fail(wErr.message);
 
     const weekIds = (allWeeks || []).map((w) => w.id);
@@ -2447,7 +2929,12 @@ export default function App() {
       stats[p.id] = { id: p.id, player: p.name, isOpponent: p.is_opponent, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0 };
     });
 
-    games.forEach((game) => {
+    const leagueMatchIds = week?.format === 'inter_club_league'
+      ? new Set(matches.filter((m) => (m.stage || 'league') === 'league').map((m) => m.id))
+      : null;
+    const standingsGames = leagueMatchIds ? games.filter((g) => leagueMatchIds.has(g.match_id)) : games;
+
+    standingsGames.forEach((game) => {
       const score = scoreFor(game.id);
       if (score.score1 == null || score.score2 == null) return;
 
@@ -2476,7 +2963,7 @@ export default function App() {
     return Object.values(stats)
       .map((x) => ({ ...x, pointDiff: x.pointsFor - x.pointsAgainst, winPct: x.played ? Math.round((x.wins / x.played) * 100) : 0 }))
       .sort((a, b) => b.wins - a.wins || b.pointDiff - a.pointDiff || b.pointsFor - a.pointsFor || a.player.localeCompare(b.player));
-  }, [players, games, scores]);
+  }, [players, games, scores, matches, week]);
 
   const teamStandings = useMemo(() => {
     const stats = {};
@@ -2484,19 +2971,12 @@ export default function App() {
       stats[t.id] = { team: t, played: 0, matchWins: 0, losses: 0, draws: 0, gameWins: 0, pointsFor: 0, pointsAgainst: 0 };
     });
 
-    matches.forEach((match) => {
-      let aw = 0, bw = 0, ap = 0, bp = 0, done = 0;
-      games.filter((g) => g.match_id === match.id).forEach((game) => {
-        const score = scoreFor(game.id);
-        if (score.score1 == null || score.score2 == null) return;
-        const a = Number(score.score1);
-        const b = Number(score.score2);
-        done++;
-        ap += a;
-        bp += b;
-        if (a > b) aw++;
-        else if (b > a) bw++;
-      });
+    const standingsMatches = week?.format === 'inter_club_league'
+      ? matches.filter((m) => (m.stage || 'league') === 'league')
+      : matches;
+
+    standingsMatches.forEach((match) => {
+      const { aw, bw, ap, bp, done } = getMatchResult(match, games, scores);
 
       const A = stats[match.team1_id];
       const B = stats[match.team2_id];
@@ -2521,7 +3001,226 @@ export default function App() {
     return Object.values(stats)
       .map((x) => ({ ...x, pointDiff: x.pointsFor - x.pointsAgainst, team: { ...x.team, teamPlayersList: playersForTeam(x.team.id) } }))
       .sort((a, b) => b.matchWins - a.matchWins || b.pointDiff - a.pointDiff || b.pointsFor - a.pointsFor);
-  }, [teams, matches, games, scores]);
+  }, [teams, matches, games, scores, week]);
+
+  const leagueMatches = useMemo(
+    () => matches.filter((m) => (m.stage || 'league') === 'league'),
+    [matches]
+  );
+  const knockoutMatches = useMemo(() => matches.filter((m) => m.stage === 'knockout'), [matches]);
+  const semifinalMatches = useMemo(() => matches.filter((m) => m.stage === 'semifinal'), [matches]);
+  const playoffsMatches = useMemo(() => matches.filter((m) => m.stage === 'playoffs'), [matches]);
+  const grandFinalMatch = useMemo(() => matches.find((m) => m.stage === 'grand_final') || null, [matches]);
+  const bronzeMatch = useMemo(() => matches.find((m) => m.stage === 'bronze') || null, [matches]);
+
+  const leagueComplete = leagueMatches.length > 0 && leagueMatches.every((m) => matchIsComplete(m, games, scores));
+  const knockoutComplete = knockoutMatches.length > 0 && knockoutMatches.every((m) => matchIsComplete(m, games, scores));
+
+  const knockoutQualifierCount = Number(knockoutQualifierCountDraft) || 0;
+
+  // Auto-seeded knockout pairs from the combined league leaderboard (rank_i
+  // vs rank_(N+1-i)), each pair overridable via knockoutOverrides before the
+  // matches are actually created.
+  const knockoutSeedPairs = useMemo(() => {
+    const n = knockoutQualifierCount;
+    if (!n || n % 2 !== 0 || n < 2 || n > teamStandings.length) return [];
+
+    const pairs = [];
+    for (let i = 0; i < n / 2; i++) {
+      const defaultTeam1 = teamStandings[i]?.team;
+      const defaultTeam2 = teamStandings[n - 1 - i]?.team;
+      const override = knockoutOverrides[i] || {};
+      const team1 = override.team1Id ? teams.find((t) => t.id === override.team1Id) : defaultTeam1;
+      const team2 = override.team2Id ? teams.find((t) => t.id === override.team2Id) : defaultTeam2;
+      pairs.push({ seedIndex: i, team1, team2, defaultTeam1, defaultTeam2 });
+    }
+    return pairs;
+  }, [knockoutQualifierCount, teamStandings, knockoutOverrides, teams]);
+
+  // Winners of the knockout matches, ordered by the ORIGINATING match's
+  // bracket_order (not re-ranked by point-diff/wins like teamStandings) —
+  // winner of seed-pair i keeps ordinal i going forward, per the confirmed
+  // "knockout standings" ranking rule.
+  const knockoutStandings = useMemo(() => {
+    return knockoutMatches
+      .slice()
+      .sort((a, b) => (a.bracket_order ?? 0) - (b.bracket_order ?? 0))
+      .map((match) => {
+        const result = getMatchResult(match, games, scores);
+        const winnerTeamId = result.winnerTeamId;
+        const loserTeamId = result.loserTeamId;
+        return {
+          seed: match.bracket_order,
+          match,
+          winner: winnerTeamId ? teams.find((t) => t.id === winnerTeamId) : null,
+          loser: loserTeamId ? teams.find((t) => t.id === loserTeamId) : null,
+        };
+      });
+  }, [knockoutMatches, games, scores, teams]);
+
+  const knockoutEntrantTeams = useMemo(() => {
+    const ids = new Set();
+    knockoutMatches.forEach((m) => { ids.add(m.team1_id); ids.add(m.team2_id); });
+    return teams.filter((t) => ids.has(t.id));
+  }, [knockoutMatches, teams]);
+
+  // Only the top 4 of Knockout Standings advance to Semifinal/Playoffs,
+  // regardless of how many teams qualified for knockouts — confirmed with
+  // the organizer as the resolution for qualifier-count vs. fixed-4 bracket.
+  const top4KnockoutWinners = useMemo(
+    () => knockoutStandings.filter((r) => r.winner).slice(0, 4).map((r) => r.winner),
+    [knockoutStandings]
+  );
+
+  // --- Semifinal path ---
+  const semifinalDefaultPairs = useMemo(() => {
+    if (top4KnockoutWinners.length < 4) return [];
+    return [
+      { bracketOrder: 1, label: 'Semifinal 1', defaultTeam1: top4KnockoutWinners[0], defaultTeam2: top4KnockoutWinners[3] },
+      { bracketOrder: 2, label: 'Semifinal 2', defaultTeam1: top4KnockoutWinners[1], defaultTeam2: top4KnockoutWinners[2] },
+    ];
+  }, [top4KnockoutWinners]);
+
+  const semifinalSeedPairs = useMemo(() => semifinalDefaultPairs.map((p) => {
+    const override = semifinalOverrides[p.bracketOrder] || {};
+    const team1 = override.team1Id ? teams.find((t) => t.id === override.team1Id) : p.defaultTeam1;
+    const team2 = override.team2Id ? teams.find((t) => t.id === override.team2Id) : p.defaultTeam2;
+    return { ...p, team1, team2 };
+  }), [semifinalDefaultPairs, semifinalOverrides, teams]);
+
+  const semifinalComplete = semifinalMatches.length === 2 && semifinalMatches.every((m) => matchIsComplete(m, games, scores));
+
+  const semifinalResults = useMemo(
+    () => semifinalMatches.map((m) => ({ match: m, ...getMatchResult(m, games, scores) })),
+    [semifinalMatches, games, scores]
+  );
+
+  const grandFinalDefaultPair = useMemo(() => {
+    if (!semifinalComplete) return null;
+    const sf1 = semifinalResults.find((r) => r.match.bracket_order === 1);
+    const sf2 = semifinalResults.find((r) => r.match.bracket_order === 2);
+    if (!sf1?.winnerTeamId || !sf2?.winnerTeamId) return null;
+    return { team1: teams.find((t) => t.id === sf1.winnerTeamId), team2: teams.find((t) => t.id === sf2.winnerTeamId) };
+  }, [semifinalComplete, semifinalResults, teams]);
+
+  const bronzeDefaultPair = useMemo(() => {
+    if (!semifinalComplete) return null;
+    const sf1 = semifinalResults.find((r) => r.match.bracket_order === 1);
+    const sf2 = semifinalResults.find((r) => r.match.bracket_order === 2);
+    if (!sf1?.loserTeamId || !sf2?.loserTeamId) return null;
+    return { team1: teams.find((t) => t.id === sf1.loserTeamId), team2: teams.find((t) => t.id === sf2.loserTeamId) };
+  }, [semifinalComplete, semifinalResults, teams]);
+
+  const grandFinalPair = useMemo(() => ({
+    team1: grandFinalOverride.team1Id ? teams.find((t) => t.id === grandFinalOverride.team1Id) : grandFinalDefaultPair?.team1,
+    team2: grandFinalOverride.team2Id ? teams.find((t) => t.id === grandFinalOverride.team2Id) : grandFinalDefaultPair?.team2,
+  }), [grandFinalOverride, grandFinalDefaultPair, teams]);
+
+  const bronzePair = useMemo(() => ({
+    team1: bronzeOverride.team1Id ? teams.find((t) => t.id === bronzeOverride.team1Id) : bronzeDefaultPair?.team1,
+    team2: bronzeOverride.team2Id ? teams.find((t) => t.id === bronzeOverride.team2Id) : bronzeDefaultPair?.team2,
+  }), [bronzeOverride, bronzeDefaultPair, teams]);
+
+  const semifinalEntrantTeams = useMemo(() => {
+    const ids = new Set();
+    semifinalMatches.forEach((m) => { ids.add(m.team1_id); ids.add(m.team2_id); });
+    return teams.filter((t) => ids.has(t.id));
+  }, [semifinalMatches, teams]);
+
+  // --- Playoffs path ---
+  const playoffsDefaultQ1E = useMemo(() => {
+    if (top4KnockoutWinners.length < 4) return null;
+    return {
+      q1: { defaultTeam1: top4KnockoutWinners[0], defaultTeam2: top4KnockoutWinners[1] },
+      eliminator: { defaultTeam1: top4KnockoutWinners[2], defaultTeam2: top4KnockoutWinners[3] },
+    };
+  }, [top4KnockoutWinners]);
+
+  const playoffsQ1Pair = useMemo(() => {
+    if (!playoffsDefaultQ1E) return null;
+    const override = playoffsOverrides[1] || {};
+    return {
+      team1: override.team1Id ? teams.find((t) => t.id === override.team1Id) : playoffsDefaultQ1E.q1.defaultTeam1,
+      team2: override.team2Id ? teams.find((t) => t.id === override.team2Id) : playoffsDefaultQ1E.q1.defaultTeam2,
+    };
+  }, [playoffsDefaultQ1E, playoffsOverrides, teams]);
+
+  const playoffsEliminatorPair = useMemo(() => {
+    if (!playoffsDefaultQ1E) return null;
+    const override = playoffsOverrides[2] || {};
+    return {
+      team1: override.team1Id ? teams.find((t) => t.id === override.team1Id) : playoffsDefaultQ1E.eliminator.defaultTeam1,
+      team2: override.team2Id ? teams.find((t) => t.id === override.team2Id) : playoffsDefaultQ1E.eliminator.defaultTeam2,
+    };
+  }, [playoffsDefaultQ1E, playoffsOverrides, teams]);
+
+  const playoffsQ1EliminatorResults = useMemo(
+    () => playoffsMatches.filter((m) => m.bracket_order === 1 || m.bracket_order === 2).map((m) => ({ match: m, ...getMatchResult(m, games, scores) })),
+    [playoffsMatches, games, scores]
+  );
+  const playoffsQ1EliminatorComplete = playoffsQ1EliminatorResults.length === 2
+    && playoffsQ1EliminatorResults.every((r) => matchIsComplete(r.match, games, scores));
+
+  const playoffsQ1EliminatorEntrantTeams = useMemo(() => {
+    const ids = new Set();
+    playoffsMatches.filter((m) => m.bracket_order === 1 || m.bracket_order === 2).forEach((m) => { ids.add(m.team1_id); ids.add(m.team2_id); });
+    return teams.filter((t) => ids.has(t.id));
+  }, [playoffsMatches, teams]);
+
+  const qualifier2DefaultPair = useMemo(() => {
+    if (!playoffsQ1EliminatorComplete) return null;
+    const q1 = playoffsQ1EliminatorResults.find((r) => r.match.bracket_order === 1);
+    const elim = playoffsQ1EliminatorResults.find((r) => r.match.bracket_order === 2);
+    if (!q1?.loserTeamId || !elim?.winnerTeamId) return null;
+    return { team1: teams.find((t) => t.id === q1.loserTeamId), team2: teams.find((t) => t.id === elim.winnerTeamId) };
+  }, [playoffsQ1EliminatorComplete, playoffsQ1EliminatorResults, teams]);
+
+  const qualifier2Pair = useMemo(() => {
+    if (!qualifier2DefaultPair) return null;
+    const override = playoffsOverrides[3] || {};
+    return {
+      team1: override.team1Id ? teams.find((t) => t.id === override.team1Id) : qualifier2DefaultPair.team1,
+      team2: override.team2Id ? teams.find((t) => t.id === override.team2Id) : qualifier2DefaultPair.team2,
+    };
+  }, [qualifier2DefaultPair, playoffsOverrides, teams]);
+
+  const qualifier2Match = playoffsMatches.find((m) => m.bracket_order === 3) || null;
+  const qualifier2Result = useMemo(
+    () => (qualifier2Match ? { match: qualifier2Match, ...getMatchResult(qualifier2Match, games, scores) } : null),
+    [qualifier2Match, games, scores]
+  );
+  const qualifier2Complete = qualifier2Match ? matchIsComplete(qualifier2Match, games, scores) : false;
+
+  const playoffsGrandFinalEntrantTeams = useMemo(() => {
+    const ids = new Set();
+    playoffsMatches.filter((m) => m.bracket_order <= 3).forEach((m) => { ids.add(m.team1_id); ids.add(m.team2_id); });
+    return teams.filter((t) => ids.has(t.id));
+  }, [playoffsMatches, teams]);
+
+  const playoffsGrandFinalDefaultPair = useMemo(() => {
+    if (!qualifier2Complete || !qualifier2Result) return null;
+    const q1 = playoffsQ1EliminatorResults.find((r) => r.match.bracket_order === 1);
+    if (!q1?.winnerTeamId || !qualifier2Result.winnerTeamId) return null;
+    return { team1: teams.find((t) => t.id === q1.winnerTeamId), team2: teams.find((t) => t.id === qualifier2Result.winnerTeamId) };
+  }, [qualifier2Complete, qualifier2Result, playoffsQ1EliminatorResults, teams]);
+
+  const playoffsGrandFinalPair = useMemo(() => {
+    if (!playoffsGrandFinalDefaultPair) return null;
+    const override = playoffsOverrides[4] || {};
+    return {
+      team1: override.team1Id ? teams.find((t) => t.id === override.team1Id) : playoffsGrandFinalDefaultPair.team1,
+      team2: override.team2Id ? teams.find((t) => t.id === override.team2Id) : playoffsGrandFinalDefaultPair.team2,
+    };
+  }, [playoffsGrandFinalDefaultPair, playoffsOverrides, teams]);
+
+  // Bronze medalist for the Playoffs path is a derived label, not a match:
+  // unconditionally whoever loses Qualifier 2 (confirmed with the organizer
+  // — the literal "won >=1 playoff game" rule is undefined in one of the two
+  // possible Qualifier 2 outcomes).
+  const playoffsBronzeLoserTeam = useMemo(
+    () => (qualifier2Result?.loserTeamId ? teams.find((t) => t.id === qualifier2Result.loserTeamId) : null),
+    [qualifier2Result, teams]
+  );
 
   const quickSelectedMatch = useMemo(() => {
     if (!quickTeam1Id || !quickTeam2Id || quickTeam1Id === quickTeam2Id) return null;
@@ -2570,7 +3269,10 @@ export default function App() {
     ['teams', 'Teams', Shield],
     ['matches', 'Matches', Swords],
     ['costs', 'Costs', Flame],
-    ['team', 'Team Standings', Trophy],
+    ['team', week?.format === 'inter_club_league' ? 'Combined Leaderboard' : 'Team Standings', Trophy],
+    ...(week?.format === 'inter_club_league' && knockoutMatches.length
+      ? [['knockoutStand', 'Knockout Standings', Trophy]]
+      : []),
     ['playersStand', 'Player Standings', Star],
     ['rankings', 'Rankings', TrendingUp],
     ['overall', 'Overall Standings', Flame],
@@ -2595,7 +3297,7 @@ export default function App() {
 
         <div className="card">
           <b>{saving ? 'SAVING' : 'LIVE SYNC'}</b>
-          <p className="buildMarker">Build: V18.4 Smart Default + Responsive UI</p>
+          <p className="buildMarker">Build: V19.0 Inter-Club League</p>
           <p className="muted">Score typing is local until Save is clicked.</p>
           <button className="btn secondary" onClick={undo}><RotateCcw size={16} /> Undo Last Score</button>
         </div>
@@ -2661,43 +3363,144 @@ export default function App() {
           <div className="card">
             <h2>Players</h2>
 
-            {!!regularPlayers.length && (
+            {(players.length === 0 && teams.length === 0) ? (
               <div className="card">
-                <h3>Quick Add from Roster</h3>
-                <button className="btn secondary" onClick={addAllRegularsToWeek}>Add All</button>
-                <div className="row" style={{ flexWrap: 'wrap', marginTop: 8 }}>
-                  {regularPlayers.map((r) => {
-                    const alreadyAdded = players.some(
-                      (p) => normalizePlayerName(p.name) === normalizePlayerName(r.name)
-                    );
-                    return (
-                      <button
-                        key={r.id}
-                        className="btn secondary"
-                        disabled={alreadyAdded}
-                        onClick={() => addPlayerFromRoster(r.name)}
-                      >
-                        {alreadyAdded ? `✓ ${r.name}` : r.name}
-                      </button>
-                    );
-                  })}
+                <h3>Match Format</h3>
+                <div className="row">
+                  <button
+                    className={week?.format !== 'inter_club_league' ? 'btn' : 'btn secondary'}
+                    onClick={() => setWeekFormat('round_robin')}
+                  >
+                    Round Robin (Internal)
+                  </button>
+                  <button
+                    className={week?.format === 'inter_club_league' ? 'btn' : 'btn secondary'}
+                    onClick={() => setWeekFormat('inter_club_league')}
+                  >
+                    Inter-Club League
+                  </button>
                 </div>
               </div>
+            ) : (
+              <p className="muted">
+                Format: <b>
+                  {week?.format === 'inter_club_league'
+                    ? 'Inter-Club League'
+                    : week?.format === 'inter_club'
+                      ? `Inter-Club vs ${week.club_name || '?'}`
+                      : 'Round Robin (Internal)'}
+                </b>
+                {' '}— locked once players or teams exist for this week.
+              </p>
             )}
 
-            <textarea value={names} onChange={(e) => setNames(e.target.value)} placeholder="Paste names, one per line" />
-            <button className="btn" onClick={addPlayers}>Add / Import Players</button>
+            {week?.format === 'inter_club_league' ? (
+              <>
+                <p className="muted">
+                  Add both clubs and their full rosters for this league. Neither club defaults to your regular
+                  players — add every participating player for each club explicitly.
+                </p>
 
-            <table>
-              <tbody>
-                {players.filter((p) => !p.is_opponent).map((p) => (
-                  <tr key={p.id}>
-                    <td><PlayerName name={p.name} onSelect={openPlayerDashboard} /></td>
-                    <td style={{ width: 120 }}><button className="btn danger" onClick={() => removePlayer(p)}><Trash2 size={16} /></button></td>
-                  </tr>
+                {clubs.map((c, idx) => (
+                  <div className="card" key={c.id}>
+                    <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center' }}>
+                      <h3>{c.name}</h3>
+                      <button className="btn danger" onClick={() => removeClub(c)}><Trash2 size={16} /></button>
+                    </div>
+
+                    <textarea
+                      value={idx === 0 ? clubARosterText : clubBRosterText}
+                      onChange={(e) => (idx === 0 ? setClubARosterText(e.target.value) : setClubBRosterText(e.target.value))}
+                      placeholder={`Paste ${c.name} player names, one per line`}
+                    />
+                    <button
+                      className="btn"
+                      onClick={() => addClubPlayers(
+                        c.id,
+                        idx === 0 ? clubARosterText : clubBRosterText,
+                        () => (idx === 0 ? setClubARosterText('') : setClubBRosterText(''))
+                      )}
+                    >
+                      Add / Import Club Players
+                    </button>
+
+                    <table>
+                      <tbody>
+                        {players.filter((p) => p.club_id === c.id).map((p) => (
+                          <tr key={p.id}>
+                            <td><PlayerName name={p.name} onSelect={openPlayerDashboard} /></td>
+                            <td style={{ width: 120 }}><button className="btn danger" onClick={() => removePlayer(p)}><Trash2 size={16} /></button></td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 ))}
-              </tbody>
-            </table>
+
+                {clubs.length < 2 && (
+                  <div className="card">
+                    <h3>Add {clubs.length === 0 ? 'First' : 'Second'} Club</h3>
+                    <div className="row">
+                      <input
+                        type="text"
+                        value={clubs.length === 0 ? clubANameDraft : clubBNameDraft}
+                        onChange={(e) => (clubs.length === 0 ? setClubANameDraft(e.target.value) : setClubBNameDraft(e.target.value))}
+                        placeholder="e.g. Riverside Badminton Club"
+                      />
+                      <button
+                        className="btn green"
+                        onClick={() => (clubs.length === 0
+                          ? createClub(clubANameDraft, () => setClubANameDraft(''))
+                          : createClub(clubBNameDraft, () => setClubBNameDraft(''))
+                        )}
+                      >
+                        Add Club
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                {!!regularPlayers.length && (
+                  <div className="card">
+                    <h3>Quick Add from Roster</h3>
+                    <button className="btn secondary" onClick={addAllRegularsToWeek}>Add All</button>
+                    <div className="row" style={{ flexWrap: 'wrap', marginTop: 8 }}>
+                      {regularPlayers.map((r) => {
+                        const alreadyAdded = players.some(
+                          (p) => normalizePlayerName(p.name) === normalizePlayerName(r.name)
+                        );
+                        return (
+                          <button
+                            key={r.id}
+                            className="btn secondary"
+                            disabled={alreadyAdded}
+                            onClick={() => addPlayerFromRoster(r.name)}
+                          >
+                            {alreadyAdded ? `✓ ${r.name}` : r.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                <textarea value={names} onChange={(e) => setNames(e.target.value)} placeholder="Paste names, one per line" />
+                <button className="btn" onClick={addPlayers}>Add / Import Players</button>
+
+                <table>
+                  <tbody>
+                    {players.filter((p) => !p.is_opponent).map((p) => (
+                      <tr key={p.id}>
+                        <td><PlayerName name={p.name} onSelect={openPlayerDashboard} /></td>
+                        <td style={{ width: 120 }}><button className="btn danger" onClick={() => removePlayer(p)}><Trash2 size={16} /></button></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
           </div>
         )}
 
@@ -2728,46 +3531,92 @@ export default function App() {
           <div className="card">
             <h2>Team Setup</h2>
 
-            {teams.length === 0 ? (
+            <p className="muted">
+              Format: <b>
+                {week?.format === 'inter_club_league'
+                  ? 'Inter-Club League'
+                  : week?.format === 'inter_club'
+                    ? `Inter-Club vs ${week.club_name || '?'}`
+                    : 'Round Robin (Internal)'}
+              </b>
+              {' '}— set from the Players tab, before any players or teams are added.
+            </p>
+
+            {week?.format === 'inter_club_league' ? (
               <div className="card">
-                <h3>Match Format</h3>
-                <div className="row">
-                  <button
-                    className={week?.format !== 'inter_club' ? 'btn' : 'btn secondary'}
-                    onClick={() => setWeekFormat('round_robin')}
-                  >
-                    Round Robin (Internal)
-                  </button>
-                  <button
-                    className={week?.format === 'inter_club' ? 'btn' : 'btn secondary'}
-                    onClick={() => setWeekFormat('inter_club')}
-                  >
-                    Inter-Club Match
-                  </button>
-                </div>
-
-                {week?.format === 'inter_club' && (
-                  <div className="row" style={{ marginTop: 8 }}>
-                    <label>Visiting Club Name
-                      <input
-                        type="text"
-                        value={clubNameDraft}
-                        onChange={(e) => setClubNameDraft(e.target.value)}
-                        placeholder="e.g. Riverside Badminton Club"
-                      />
-                    </label>
-                    <button className="btn green" onClick={saveClubName} disabled={!clubNameDraft.trim()}>Save Club Name</button>
-                  </div>
+                <h3>Manual Team Assignment per Club</h3>
+                {matches.some((m) => (m.stage || 'league') === 'league') && (
+                  <p className="muted">Teams are locked — the league schedule has already been generated.</p>
                 )}
-              </div>
-            ) : (
-              <p className="muted">
-                Format: <b>{week?.format === 'inter_club' ? `Inter-Club vs ${week.club_name || '?'}` : 'Round Robin (Internal)'}</b>
-                {' '}— locked once teams exist for this week.
-              </p>
-            )}
+                {clubs.length < 2 && (
+                  <p className="muted">Add both clubs and their rosters in the Players tab first.</p>
+                )}
 
-            {week?.format === 'inter_club' ? (
+                {clubs.map((c) => {
+                  const clubPlayers = players.filter((p) => p.club_id === c.id);
+                  const clubTeams = teams.filter((t) => t.club_id === c.id);
+                  const clubM = getClubManual(c.id);
+                  const locked = matches.some((m) => (m.stage || 'league') === 'league');
+
+                  return (
+                    <div className="card" key={c.id}>
+                      <h3>{c.name}</h3>
+
+                      {!locked && (
+                        <>
+                          <div className="row">
+                            <label>Number of Teams
+                              <input
+                                type="text"
+                                inputMode="numeric"
+                                value={clubM.teamCount}
+                                onChange={(e) => setClubManualTeamCount(c.id, e.target.value)}
+                              />
+                            </label>
+                            <button className="btn green" onClick={() => saveManualTeamsForClub(c)}>Save {c.name} Teams</button>
+                          </div>
+
+                          <div className="manualGrid">
+                            {Array.from({ length: Number(clubM.teamCount) || 0 }, (_, i) => (
+                              <div className="card" key={i}>
+                                <h3>{teamColors[i % teamColors.length][1]} {c.name} {teamColors[i % teamColors.length][0]}</h3>
+                                {clubPlayers.map((p) => (
+                                  <label className="checkrow" key={p.id}>
+                                    <input
+                                      type="radio"
+                                      name={`assign-${c.id}-${p.id}`}
+                                      checked={Number(clubM.assignments[p.id]) === i}
+                                      onChange={() => setClubManualAssign(c.id, p.id, i)}
+                                    />
+                                    {p.name}
+                                  </label>
+                                ))}
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
+
+                      {!!clubTeams.length && (
+                        <>
+                          <h3>{c.name} Teams</h3>
+                          {clubTeams.map((t) => (
+                            <div className="card" key={t.id} style={{ borderLeft: `5px solid ${t.color}` }}>
+                              <h3>{t.emoji} {t.name}</h3>
+                              <p>
+                                {playersForTeam(t.id).map((p, i) => (
+                                  <span key={p.id}>{i > 0 && ', '}<PlayerName name={p.name} onSelect={openPlayerDashboard} /></span>
+                                ))}
+                              </p>
+                            </div>
+                          ))}
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : week?.format === 'inter_club' ? (
               <div className="card">
                 <h3>Visiting Club Roster</h3>
                 <p className="muted">
@@ -2912,34 +3761,38 @@ export default function App() {
               </>
             )}
 
-            <h2>Current Teams</h2>
-            {Object.entries(
-              teams.reduce((acc, t) => {
-                const setNumber = t.set_number || 1;
-                if (!acc[setNumber]) acc[setNumber] = [];
-                acc[setNumber].push(t);
-                return acc;
-              }, {})
-            )
-              .sort(([a], [b]) => Number(a) - Number(b))
-              .map(([setNumber, setTeams]) => (
-                <div key={setNumber} className="setGroup">
-                  <div className="row setGroupHeader">
-                    <h3>Set {setNumber}</h3>
-                    <button className="btn danger" onClick={() => deleteSet(Number(setNumber))}>Delete This Set</button>
-                  </div>
-                  {setTeams.map((t) => (
-                    <div className="card" key={t.id} style={{ borderLeft: `5px solid ${t.color}` }}>
-                      <h3>{t.emoji} {t.name}</h3>
-                      <p>
-                        {playersForTeam(t.id).map((p, i) => (
-                          <span key={p.id}>{i > 0 && ', '}<PlayerName name={p.name} onSelect={openPlayerDashboard} /></span>
-                        ))}
-                      </p>
+            {week?.format !== 'inter_club_league' && (
+              <>
+                <h2>Current Teams</h2>
+                {Object.entries(
+                  teams.reduce((acc, t) => {
+                    const setNumber = t.set_number || 1;
+                    if (!acc[setNumber]) acc[setNumber] = [];
+                    acc[setNumber].push(t);
+                    return acc;
+                  }, {})
+                )
+                  .sort(([a], [b]) => Number(a) - Number(b))
+                  .map(([setNumber, setTeams]) => (
+                    <div key={setNumber} className="setGroup">
+                      <div className="row setGroupHeader">
+                        <h3>Set {setNumber}</h3>
+                        <button className="btn danger" onClick={() => deleteSet(Number(setNumber))}>Delete This Set</button>
+                      </div>
+                      {setTeams.map((t) => (
+                        <div className="card" key={t.id} style={{ borderLeft: `5px solid ${t.color}` }}>
+                          <h3>{t.emoji} {t.name}</h3>
+                          <p>
+                            {playersForTeam(t.id).map((p, i) => (
+                              <span key={p.id}>{i > 0 && ', '}<PlayerName name={p.name} onSelect={openPlayerDashboard} /></span>
+                            ))}
+                          </p>
+                        </div>
+                      ))}
                     </div>
                   ))}
-                </div>
-              ))}
+              </>
+            )}
           </div>
         )}
 
@@ -2950,6 +3803,352 @@ export default function App() {
               Use the team dropdowns, search by player, or continue using the full match list.
               Every view edits the same individual game scores.
             </p>
+
+            {week?.format === 'inter_club_league' && !matches.some((m) => (m.stage || 'league') === 'league') && (
+              <div className="card">
+                <h3>League Schedule</h3>
+                <p className="muted">
+                  Every team from {clubs[0]?.name || 'Club 1'} plays every team from {clubs[1]?.name || 'Club 2'}, once
+                  each.
+                </p>
+                <button
+                  className="btn green"
+                  onClick={generateLeagueSchedule}
+                  disabled={clubs.length < 2 || !clubs.every((c) => teams.some((t) => t.club_id === c.id))}
+                >
+                  Generate League Schedule
+                </button>
+              </div>
+            )}
+
+            {week?.format === 'inter_club_league' && leagueMatches.length > 0 && (
+              <div className="card">
+                <h3>Tournament Progress</h3>
+
+                {!leagueComplete && (
+                  <p className="muted">Finish entering every league score to continue to knockouts.</p>
+                )}
+
+                {leagueComplete && week?.knockouts_choice === 'pending' && (
+                  <div className="card">
+                    <h4>Run Knockouts?</h4>
+                    <div className="row">
+                      <button className="btn" onClick={() => chooseKnockouts('yes')}>Yes</button>
+                      <button className="btn secondary" onClick={() => chooseKnockouts('no')}>No</button>
+                    </div>
+                  </div>
+                )}
+
+                {week?.knockouts_choice === 'no' && (
+                  <p className="muted">No knockouts — the Combined Leaderboard is final for this week.</p>
+                )}
+
+                {week?.knockouts_choice === 'yes' && knockoutMatches.length === 0 && (
+                  <div className="card">
+                    <h4>Knockout Seeding</h4>
+                    <p className="muted">Ranks come from the Combined Leaderboard: rank 1 vs last, rank 2 vs 2nd-last, and so on.</p>
+                    <div className="row">
+                      <label>Number of Qualifiers (even)
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          value={knockoutQualifierCountDraft}
+                          onChange={(e) => setKnockoutQualifierCountDraft(e.target.value)}
+                        />
+                      </label>
+                    </div>
+
+                    {knockoutSeedPairs.map((p) => (
+                      <div className="row" key={p.seedIndex} style={{ alignItems: 'center' }}>
+                        <b style={{ minWidth: 100 }}>Knockout {p.seedIndex + 1}</b>
+                        <select
+                          value={p.team1?.id || ''}
+                          onChange={(e) => setKnockoutOverride(p.seedIndex, 'team1Id', e.target.value)}
+                        >
+                          <option value="">Select Team</option>
+                          {teams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                        </select>
+                        <span>vs</span>
+                        <select
+                          value={p.team2?.id || ''}
+                          onChange={(e) => setKnockoutOverride(p.seedIndex, 'team2Id', e.target.value)}
+                        >
+                          <option value="">Select Team</option>
+                          {teams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                        </select>
+                      </div>
+                    ))}
+
+                    <button className="btn green" onClick={confirmKnockoutMatches} disabled={!knockoutSeedPairs.length}>
+                      Confirm Knockout Matches
+                    </button>
+                  </div>
+                )}
+
+                {knockoutMatches.length > 0 && (
+                  <div className="card">
+                    <h4>Knockout Standings</h4>
+                    <p className="muted">Winners of each knockout matchup, in seed order — everything below is based on this ranking, not the league standings.</p>
+                    <table>
+                      <thead><tr><th>Rank</th><th>Team</th></tr></thead>
+                      <tbody>
+                        {knockoutStandings.map((r) => (
+                          <tr key={r.seed}>
+                            <td>{r.seed}</td>
+                            <td>{r.winner ? `${r.winner.emoji} ${r.winner.name}` : 'Not yet decided'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+
+                    {!knockoutComplete && (
+                      <p className="muted">Finish entering every knockout score to choose Semifinals or Playoffs.</p>
+                    )}
+
+                    {knockoutComplete && !week?.bracket_format && (
+                      <div className="row">
+                        <button className="btn" onClick={() => chooseBracketFormat('semifinal')}>Semifinal Format</button>
+                        <button className="btn secondary" onClick={() => chooseBracketFormat('playoffs')}>Playoffs Format</button>
+                      </div>
+                    )}
+
+                    {knockoutComplete && !semifinalMatches.length && !playoffsMatches.length && (
+                      <button className="btn danger" onClick={() => redoStage('knockout')} style={{ marginTop: 8 }}>
+                        Redo Knockouts
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {week?.bracket_format === 'semifinal' && (
+                  <div className="card">
+                    <h4>Semifinals</h4>
+                    <p className="muted">Rank 1 vs Rank 4, Rank 2 vs Rank 3 (from Knockout Standings). Override pool: every team that played knockouts.</p>
+
+                    {!semifinalMatches.length ? (
+                      <>
+                        {semifinalSeedPairs.map((p) => (
+                          <div className="row" key={p.bracketOrder} style={{ alignItems: 'center' }}>
+                            <b style={{ minWidth: 100 }}>{p.label}</b>
+                            <select
+                              value={p.team1?.id || ''}
+                              onChange={(e) => setSemifinalOverride(p.bracketOrder, 'team1Id', e.target.value)}
+                            >
+                              <option value="">Select Team</option>
+                              {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                            </select>
+                            <span>vs</span>
+                            <select
+                              value={p.team2?.id || ''}
+                              onChange={(e) => setSemifinalOverride(p.bracketOrder, 'team2Id', e.target.value)}
+                            >
+                              <option value="">Select Team</option>
+                              {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                            </select>
+                          </div>
+                        ))}
+                        <button className="btn green" onClick={confirmSemifinalMatches} disabled={semifinalSeedPairs.length < 2}>
+                          Confirm Semifinal Matches
+                        </button>
+                      </>
+                    ) : !semifinalComplete ? (
+                      <>
+                        <p className="muted">Finish entering both semifinal scores to continue.</p>
+                        <button className="btn danger" onClick={() => redoStage('semifinal')}>Redo Semifinals</button>
+                      </>
+                    ) : (
+                      <>
+                        {!grandFinalMatch && (
+                          <div className="card">
+                            <h4>Grand Final</h4>
+                            <p className="muted">Override pool: every team that played in the Semifinals.</p>
+                            <div className="row" style={{ alignItems: 'center' }}>
+                              <select
+                                value={grandFinalPair.team1?.id || ''}
+                                onChange={(e) => setGrandFinalOverrideSide('team1Id', e.target.value)}
+                              >
+                                <option value="">Select Team</option>
+                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                              </select>
+                              <span>vs</span>
+                              <select
+                                value={grandFinalPair.team2?.id || ''}
+                                onChange={(e) => setGrandFinalOverrideSide('team2Id', e.target.value)}
+                              >
+                                <option value="">Select Team</option>
+                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                              </select>
+                            </div>
+                            <button className="btn green" onClick={confirmGrandFinalMatch}>Confirm Grand Final</button>
+                          </div>
+                        )}
+
+                        {!bronzeMatch && (
+                          <div className="card">
+                            <h4>Bronze Medal Match</h4>
+                            <p className="muted">Losers of the Semifinals. Override pool: every team that played in the Semifinals.</p>
+                            <div className="row" style={{ alignItems: 'center' }}>
+                              <select
+                                value={bronzePair.team1?.id || ''}
+                                onChange={(e) => setBronzeOverrideSide('team1Id', e.target.value)}
+                              >
+                                <option value="">Select Team</option>
+                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                              </select>
+                              <span>vs</span>
+                              <select
+                                value={bronzePair.team2?.id || ''}
+                                onChange={(e) => setBronzeOverrideSide('team2Id', e.target.value)}
+                              >
+                                <option value="">Select Team</option>
+                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                              </select>
+                            </div>
+                            <button className="btn green" onClick={confirmBronzeMatch}>Confirm Bronze Medal Match</button>
+                          </div>
+                        )}
+
+                        {!grandFinalMatch && !bronzeMatch && (
+                          <button className="btn danger" onClick={() => redoStage('semifinal')}>Redo Semifinals</button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {week?.bracket_format === 'playoffs' && (
+                  <div className="card">
+                    <h4>Playoffs</h4>
+                    <p className="muted">Qualifier 1: Rank 1 vs Rank 2. Eliminator: Rank 3 vs Rank 4 (from Knockout Standings).</p>
+
+                    {!playoffsQ1EliminatorResults.length ? (
+                      <>
+                        <div className="row" style={{ alignItems: 'center' }}>
+                          <b style={{ minWidth: 100 }}>Qualifier 1</b>
+                          <select
+                            value={playoffsQ1Pair?.team1?.id || ''}
+                            onChange={(e) => setPlayoffsOverride(1, 'team1Id', e.target.value)}
+                          >
+                            <option value="">Select Team</option>
+                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                          </select>
+                          <span>vs</span>
+                          <select
+                            value={playoffsQ1Pair?.team2?.id || ''}
+                            onChange={(e) => setPlayoffsOverride(1, 'team2Id', e.target.value)}
+                          >
+                            <option value="">Select Team</option>
+                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                          </select>
+                        </div>
+                        <div className="row" style={{ alignItems: 'center' }}>
+                          <b style={{ minWidth: 100 }}>Eliminator</b>
+                          <select
+                            value={playoffsEliminatorPair?.team1?.id || ''}
+                            onChange={(e) => setPlayoffsOverride(2, 'team1Id', e.target.value)}
+                          >
+                            <option value="">Select Team</option>
+                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                          </select>
+                          <span>vs</span>
+                          <select
+                            value={playoffsEliminatorPair?.team2?.id || ''}
+                            onChange={(e) => setPlayoffsOverride(2, 'team2Id', e.target.value)}
+                          >
+                            <option value="">Select Team</option>
+                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                          </select>
+                        </div>
+                        <button
+                          className="btn green"
+                          onClick={confirmQualifier1AndEliminator}
+                          disabled={!playoffsQ1Pair || !playoffsEliminatorPair}
+                        >
+                          Confirm Qualifier 1 &amp; Eliminator
+                        </button>
+                      </>
+                    ) : !playoffsQ1EliminatorComplete ? (
+                      <>
+                        <p className="muted">Finish entering the Qualifier 1 and Eliminator scores to continue.</p>
+                        <button className="btn danger" onClick={() => redoStage('playoffs')}>Redo Playoffs</button>
+                      </>
+                    ) : !qualifier2Match ? (
+                      <div className="card">
+                        <h4>Qualifier 2</h4>
+                        <p className="muted">Loser of Qualifier 1 vs winner of Eliminator. Override pool: teams that played Qualifier 1 or Eliminator.</p>
+                        <div className="row" style={{ alignItems: 'center' }}>
+                          <select
+                            value={qualifier2Pair?.team1?.id || ''}
+                            onChange={(e) => setPlayoffsOverride(3, 'team1Id', e.target.value)}
+                          >
+                            <option value="">Select Team</option>
+                            {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                          </select>
+                          <span>vs</span>
+                          <select
+                            value={qualifier2Pair?.team2?.id || ''}
+                            onChange={(e) => setPlayoffsOverride(3, 'team2Id', e.target.value)}
+                          >
+                            <option value="">Select Team</option>
+                            {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                          </select>
+                        </div>
+                        <button className="btn green" onClick={confirmQualifier2Match} disabled={!qualifier2Pair}>
+                          Confirm Qualifier 2
+                        </button>
+                      </div>
+                    ) : !qualifier2Complete ? (
+                      <p className="muted">Finish entering the Qualifier 2 score to continue.</p>
+                    ) : (
+                      <>
+                        {!grandFinalMatch && (
+                          <div className="card">
+                            <h4>Grand Final</h4>
+                            <p className="muted">Winner of Qualifier 1 vs winner of Qualifier 2. Override pool: teams that played Qualifier 1, Eliminator, or Qualifier 2.</p>
+                            <div className="row" style={{ alignItems: 'center' }}>
+                              <select
+                                value={playoffsGrandFinalPair?.team1?.id || ''}
+                                onChange={(e) => setGrandFinalOverrideSide('team1Id', e.target.value)}
+                              >
+                                <option value="">Select Team</option>
+                                {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                              </select>
+                              <span>vs</span>
+                              <select
+                                value={playoffsGrandFinalPair?.team2?.id || ''}
+                                onChange={(e) => setGrandFinalOverrideSide('team2Id', e.target.value)}
+                              >
+                                <option value="">Select Team</option>
+                                {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                              </select>
+                            </div>
+                            <button className="btn green" onClick={confirmGrandFinalMatch} disabled={!playoffsGrandFinalPair}>
+                              Confirm Grand Final
+                            </button>
+                          </div>
+                        )}
+
+                        {playoffsBronzeLoserTeam && (
+                          <p className="muted">
+                            Bronze medalist (loser of Qualifier 2): <b>{playoffsBronzeLoserTeam.emoji} {playoffsBronzeLoserTeam.name}</b>
+                          </p>
+                        )}
+
+                        {!grandFinalMatch && (
+                          <button className="btn danger" onClick={() => redoStage('playoffs')}>Redo Playoffs</button>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {grandFinalMatch && matchIsComplete(grandFinalMatch, games, scores) && (
+                  <p className="muted">
+                    🏆 Champion: <b>{team(getMatchResult(grandFinalMatch, games, scores).winnerTeamId)?.name}</b>
+                  </p>
+                )}
+              </div>
+            )}
 
             <div className="scoreToolsGrid">
               <div className="card scoreToolCard">
@@ -3082,43 +4281,86 @@ export default function App() {
             <h2>Full Match Schedule</h2>
             <p className="muted">The original individual-game score entry remains available below.</p>
 
-            {Object.entries(
-              matches.reduce((acc, m) => {
-                const setNumber = m.set_number || 1;
-                if (!acc[setNumber]) acc[setNumber] = [];
-                acc[setNumber].push(m);
-                return acc;
-              }, {})
-            )
-              .sort(([a], [b]) => Number(a) - Number(b))
-              .map(([setNumber, setMatches]) => (
-                <div key={setNumber} className="setGroup">
-                  <h3>Set {setNumber}</h3>
-                  {setMatches.map((match) => (
-                    <div className="card" key={match.id}>
-                      <div className="row">
-                        <h3>
-                          Slot {match.slot} · Court {match.court} · {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
-                        </h3>
-                        <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
-                          Reset Match Scores
-                        </button>
-                      </div>
+            {week?.format === 'inter_club_league' ? (
+              Object.entries(
+                matches.reduce((acc, m) => {
+                  const stage = m.stage || 'league';
+                  if (!acc[stage]) acc[stage] = [];
+                  acc[stage].push(m);
+                  return acc;
+                }, {})
+              )
+                .sort(([a], [b]) => STAGE_ORDER.indexOf(a) - STAGE_ORDER.indexOf(b))
+                .map(([stage, stageMatches]) => (
+                  <div key={stage} className="setGroup">
+                    <h3>{STAGE_LABELS[stage] || stage}</h3>
+                    {stageMatches
+                      .sort((a, b) => (a.bracket_order ?? a.slot ?? 0) - (b.bracket_order ?? b.slot ?? 0))
+                      .map((match) => (
+                        <div className="card" key={match.id}>
+                          <div className="row">
+                            <h3>
+                              {match.label ? `${match.label} · ` : `Slot ${match.slot} · Court ${match.court} · `}
+                              {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
+                            </h3>
+                            <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
+                              Reset Match Scores
+                            </button>
+                          </div>
 
-                      <div className="teamVsBlock">
-                        <TeamLabel teamId={match.team1_id} />
-                        <div className="scoreBig">VS</div>
-                        <TeamLabel teamId={match.team2_id} />
-                      </div>
+                          <div className="teamVsBlock">
+                            <TeamLabel teamId={match.team1_id} />
+                            <div className="scoreBig">VS</div>
+                            <TeamLabel teamId={match.team2_id} />
+                          </div>
 
-                      {games
-                        .filter((game) => game.match_id === match.id)
-                        .sort((a, b) => a.game_number - b.game_number)
-                        .map((game) => renderGameScoreEditor(game))}
-                    </div>
-                  ))}
-                </div>
-              ))}
+                          {games
+                            .filter((game) => game.match_id === match.id)
+                            .sort((a, b) => a.game_number - b.game_number)
+                            .map((game) => renderGameScoreEditor(game))}
+                        </div>
+                      ))}
+                  </div>
+                ))
+            ) : (
+              Object.entries(
+                matches.reduce((acc, m) => {
+                  const setNumber = m.set_number || 1;
+                  if (!acc[setNumber]) acc[setNumber] = [];
+                  acc[setNumber].push(m);
+                  return acc;
+                }, {})
+              )
+                .sort(([a], [b]) => Number(a) - Number(b))
+                .map(([setNumber, setMatches]) => (
+                  <div key={setNumber} className="setGroup">
+                    <h3>Set {setNumber}</h3>
+                    {setMatches.map((match) => (
+                      <div className="card" key={match.id}>
+                        <div className="row">
+                          <h3>
+                            Slot {match.slot} · Court {match.court} · {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
+                          </h3>
+                          <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
+                            Reset Match Scores
+                          </button>
+                        </div>
+
+                        <div className="teamVsBlock">
+                          <TeamLabel teamId={match.team1_id} />
+                          <div className="scoreBig">VS</div>
+                          <TeamLabel teamId={match.team2_id} />
+                        </div>
+
+                        {games
+                          .filter((game) => game.match_id === match.id)
+                          .sort((a, b) => a.game_number - b.game_number)
+                          .map((game) => renderGameScoreEditor(game))}
+                      </div>
+                    ))}
+                  </div>
+                ))
+            )}
           </div>
         )}
 
@@ -3177,7 +4419,32 @@ export default function App() {
         )}
 
 
-        {tab === 'team' && <Standings rows={teamStandings} type="team" onSelectPlayer={openPlayerDashboard} />}
+        {tab === 'team' && (
+          <Standings
+            rows={teamStandings}
+            type="team"
+            onSelectPlayer={openPlayerDashboard}
+            title={week?.format === 'inter_club_league' ? 'Combined Leaderboard' : 'Standings'}
+          />
+        )}
+        {tab === 'knockoutStand' && (
+          <div className="card">
+            <h2>Knockout Standings</h2>
+            <div className="fireline" />
+            <p className="muted">Winners of each knockout matchup, in seed order — everything downstream (Semifinals/Playoffs) ranks off this, not the league leaderboard.</p>
+            <table>
+              <thead><tr><th>Rank</th><th>Team</th></tr></thead>
+              <tbody>
+                {knockoutStandings.map((r) => (
+                  <tr key={r.seed}>
+                    <td>{r.seed}</td>
+                    <td>{r.winner ? `${r.winner.emoji} ${r.winner.name}` : 'Not yet decided'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
         {tab === 'playersStand' && <Standings rows={playerStandings} type="player" onSelectPlayer={openPlayerDashboard} awayLabel={week?.club_name} />}
         {tab === 'rankings' && <RankingsStandings rows={rankingRows} onRefresh={loadLeagueRankings} onSelectPlayer={openPlayerDashboard} />}
         {tab === 'funstats' && <FunStats data={funStats} onSelectPlayer={openPlayerDashboard} />}
@@ -3261,10 +4528,10 @@ function PlayerName({ name, onSelect }) {
   return <button type="button" className="playerNameLink" onClick={() => onSelect(name)}>{name}</button>;
 }
 
-function Standings({ rows, type, onSelectPlayer, awayLabel }) {
+function Standings({ rows, type, onSelectPlayer, awayLabel, title }) {
   return (
     <div className="card">
-      <h2>Standings</h2>
+      <h2>{title || 'Standings'}</h2>
       <div className="fireline" />
 
       {type === 'team' ? (

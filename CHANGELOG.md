@@ -1,5 +1,46 @@
 # Changelog
 
+## 2026-07-28 — Inter-Club League Format (replaces the simple Inter-Club Match format)
+
+### 1. Inter-Club League
+
+- A week's format is now picked from the **Players** tab (moved from Teams), before any players
+  or teams are added: **Round Robin (Internal)**, or the new **Inter-Club League**. The old
+  **Inter-Club Match** picker button is gone, but weeks that already used it keep working exactly
+  as before — nothing about that format's data or rendering changed.
+- Inter-Club League weeks ask for **two club names** and a full roster for each — unlike the old
+  Inter-Club Match format, neither club defaults to our own regular players.
+- **Teams** tab: each club's players are manually assigned into teams independently, from a
+  dropdown scoped to that club's roster.
+- **Matches** tab gets a **Generate League Schedule** button once both clubs have teams: every
+  team in Club A plays every team in Club B exactly once (a complete bipartite round robin, not
+  the internal circle-method round robin used by Round Robin weeks), spread across rounds so no
+  team plays twice in the same round.
+- **Combined Leaderboard**: the existing Team Standings screen, relabeled, showing both clubs'
+  teams together — same computation, just scoped to the league stage once knockouts start.
+- **Knockouts**: after every league game is scored, choose whether to run knockouts. If yes, pick
+  how many teams qualify (any even number), and the app seeds Rank 1 vs. last, Rank 2 vs.
+  2nd-last, and so on from the Combined Leaderboard — every seeded matchup can be overridden from
+  a dropdown of all teams before confirming.
+- **Knockout Standings**: a new section (and standings tab) showing just the winners of each
+  knockout matchup, in seed order — everything downstream ranks off this, not the league table.
+- Choose **Semifinal** or **Playoffs** format off the top 4 of Knockout Standings:
+  - Semifinal: Rank 1 vs. 4, Rank 2 vs. 3, then a **Grand Final** (semifinal winners) and a
+    **Bronze Medal Match** (semifinal losers) — both playable, both overridable from a dropdown of
+    every team that reached the Semifinals.
+  - Playoffs: Qualifier 1 (Rank 1 vs. 2), Eliminator (Rank 3 vs. 4), Qualifier 2 (Qualifier 1's
+    loser vs. Eliminator's winner), then a **Grand Final** (Qualifier 1 and Qualifier 2 winners).
+    The Bronze medalist is whoever loses Qualifier 2 — not a scheduled match, just a computed
+    result.
+- Every stage that's auto-seeded from a ranking has a manual override dropdown, scoped to that
+  stage's actual pool of eligible teams (e.g. Semifinal overrides only offer teams that played
+  knockouts; Grand Final overrides only offer teams that played the prior round).
+- Inter-Club League weeks are excluded from the cross-week Rankings, Overall Standings, and
+  teammate-repeat/skill-balancing history, same principle as Inter-Club Match weeks already were.
+- New `clubs` table; new `club_id` column on `players` and `teams`; new `stage`, `bracket_order`,
+  and `label` columns on `matches`; new `knockouts_choice`, `knockout_qualifier_count`, and
+  `bracket_format` columns on `weeks`. Fully additive — no existing data is touched.
+
 ## 2026-07-17 — Inter-Club Match Format, Fun Stats, and Cross-League Standings
 
 ### 1. Inter-Club Match Format

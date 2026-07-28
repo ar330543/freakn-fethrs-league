@@ -260,3 +260,65 @@ exception when duplicate_object then null; end $$;
 alter table weeks add column if not exists club_name text;
 
 alter table players add column if not exists is_opponent boolean not null default false;
+
+
+
+-- V23 non-destructive inter-club league format
+-- Replaces the simple V22 inter-club setup flow going forward (that flow's
+-- data/rendering stays fully intact for historical weeks — this just adds a
+-- richer 'inter_club_league' option alongside it).
+--
+-- IMPORTANT: unlike every other guarded block in this file, this next one
+-- must actively replace the existing constraint. The
+-- `exception when duplicate_object then null` guard pattern used everywhere
+-- else only *adds* a constraint if it's absent — on a DB that already ran
+-- V22, weeks_format_check already exists, so a plain "add constraint" would
+-- silently no-op and never widen the allowed values.
+alter table weeks drop constraint if exists weeks_format_check;
+alter table weeks add constraint weeks_format_check
+  check (format in ('round_robin', 'inter_club', 'inter_club_league'));
+
+alter table weeks add column if not exists knockouts_choice text not null default 'pending';
+do $$ begin
+  alter table weeks add constraint weeks_knockouts_choice_check check (knockouts_choice in ('pending', 'yes', 'no'));
+exception when duplicate_object then null; end $$;
+alter table weeks add column if not exists knockout_qualifier_count int;
+alter table weeks add column if not exists bracket_format text;
+do $$ begin
+  alter table weeks add constraint weeks_bracket_format_check check (bracket_format in ('semifinal', 'playoffs'));
+exception when duplicate_object then null; end $$;
+
+create table if not exists clubs (
+  id uuid primary key default gen_random_uuid(),
+  week_id uuid references weeks(id) on delete cascade not null,
+  name text not null,
+  created_at timestamptz default now(),
+  unique(week_id, name)
+);
+alter table clubs enable row level security;
+drop policy if exists "public all clubs" on clubs;
+create policy "public all clubs" on clubs for all using (true) with check (true);
+do $$ begin alter publication supabase_realtime add table clubs; exception when duplicate_object then null; end $$;
+
+alter table players add column if not exists club_id uuid references clubs(id) on delete set null;
+alter table teams add column if not exists club_id uuid references clubs(id) on delete set null;
+
+-- Widen player-name uniqueness so same-named players in different clubs
+-- (e.g. two "Mike"s, one per club) don't collide in the week_id+name upsert
+-- pattern used by addPlayers/addOpponentPlayers/addPlayerFromRoster. club_id
+-- is null for round_robin/inter_club weeks, and Postgres treats null as
+-- distinct, so existing behavior for those formats is unchanged.
+alter table players drop constraint if exists players_week_id_name_key;
+alter table players add constraint players_week_id_club_id_name_key unique (week_id, club_id, name);
+
+alter table matches add column if not exists stage text not null default 'league';
+do $$ begin
+  alter table matches add constraint matches_stage_check check (stage in ('league', 'knockout', 'semifinal', 'playoffs', 'grand_final', 'bronze'));
+exception when duplicate_object then null; end $$;
+-- bracket_order semantics: knockout = seed-pair index (1..N/2); semifinal =
+-- 1|2 (SF1/SF2); playoffs = 1=Qualifier1, 2=Eliminator, 3=Qualifier2,
+-- 4=Grand Final; grand_final/bronze = always 1. Default stage='league' means
+-- every historical round_robin/inter_club match reads as 'league' with no
+-- backfill needed.
+alter table matches add column if not exists bracket_order int;
+alter table matches add column if not exists label text;

@@ -1,12 +1,12 @@
 {
-  "release": "V18.4",
-  "buildMarker": "Build: V18.4 Smart Default + Responsive UI",
-  "databaseMigrationRequired": false,
+  "release": "V19.0",
+  "buildMarker": "Build: V19.0 Inter-Club League",
+  "databaseMigrationRequired": true,
   "dataDestructive": false,
   "fixes": [
-    "Initial load now selects the league and week with the most recent activity.",
-    "Recent activity includes week creation, players added, teams generated, matches created, scores updated and costs updated.",
-    "Phone layout has a compact sticky header, horizontal navigation, stacked selectors, cleaner score cards and scrollable tables.",
-    "Desktop and iPad layouts remain intact."
+    "Added the Inter-Club League match format: two clubs, per-club teams, a full cross-club league schedule, a Combined Leaderboard, optional Knockouts, and a Semifinal-or-Playoffs bracket through to a Grand Final and Bronze Medal result.",
+    "The Match Format picker moved from the Teams tab to the Players tab, and is now locked once a week has any players or teams (previously teams only).",
+    "Every auto-seeded matchup in the new format (Knockouts, Semifinals/Playoffs, Grand Final, Bronze) can be manually overridden from a dropdown before it's confirmed.",
+    "The prior Inter-Club Match format still works for existing weeks that used it, but is no longer offered for new weeks."
   ]
 }
