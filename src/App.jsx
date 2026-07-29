@@ -1284,7 +1284,7 @@ export default function App() {
     await act(async () => {
       const { error: err } = await supabase
         .from('players')
-        .upsert(arr.map((name) => ({ week_id: weekId, name })), { onConflict: 'week_id,name' });
+        .upsert(arr.map((name) => ({ week_id: weekId, name })), { onConflict: 'week_id,club_id,name' });
       if (err) throw err;
       setNames('');
     });
@@ -1298,7 +1298,7 @@ export default function App() {
     await act(async () => {
       const { error: err } = await supabase
         .from('players')
-        .upsert(arr.map((name) => ({ week_id: weekId, name, is_opponent: true })), { onConflict: 'week_id,name' });
+        .upsert(arr.map((name) => ({ week_id: weekId, name, is_opponent: true })), { onConflict: 'week_id,club_id,name' });
       if (err) throw err;
       setOpponentNames('');
     });
@@ -1375,7 +1375,7 @@ export default function App() {
     await act(async () => {
       const { error: err } = await supabase
         .from('players')
-        .upsert([{ week_id: weekId, name }], { onConflict: 'week_id,name' });
+        .upsert([{ week_id: weekId, name }], { onConflict: 'week_id,club_id,name' });
       if (err) throw err;
     });
   }
@@ -1391,7 +1391,7 @@ export default function App() {
 
       const { error: err } = await supabase
         .from('players')
-        .upsert(sourcePlayers.map((p) => ({ week_id: weekId, name: p.name })), { onConflict: 'week_id,name' });
+        .upsert(sourcePlayers.map((p) => ({ week_id: weekId, name: p.name })), { onConflict: 'week_id,club_id,name' });
       if (err) throw err;
     });
   }
@@ -1403,7 +1403,7 @@ export default function App() {
     await act(async () => {
       const { error: err } = await supabase
         .from('players')
-        .upsert(regularPlayers.map((r) => ({ week_id: weekId, name: r.name })), { onConflict: 'week_id,name' });
+        .upsert(regularPlayers.map((r) => ({ week_id: weekId, name: r.name })), { onConflict: 'week_id,club_id,name' });
       if (err) throw err;
     });
   }

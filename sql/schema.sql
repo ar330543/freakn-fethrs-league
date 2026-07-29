@@ -305,9 +305,9 @@ alter table teams add column if not exists club_id uuid references clubs(id) on 
 
 -- Widen player-name uniqueness so same-named players in different clubs
 -- (e.g. two "Mike"s, one per club) don't collide in the week_id+name upsert
--- pattern used by addPlayers/addOpponentPlayers/addPlayerFromRoster. club_id
--- is null for round_robin/inter_club weeks, and Postgres treats null as
--- distinct, so existing behavior for those formats is unchanged.
+-- pattern used by addPlayers/addOpponentPlayers/addPlayerFromRoster.
+-- NOTE: this constraint definition had a bug, fixed in V24 below — see that
+-- block for why "unique (week_id, club_id, name)" alone was wrong.
 alter table players drop constraint if exists players_week_id_name_key;
 alter table players add constraint players_week_id_club_id_name_key unique (week_id, club_id, name);
 
@@ -322,3 +322,18 @@ exception when duplicate_object then null; end $$;
 -- backfill needed.
 alter table matches add column if not exists bracket_order int;
 alter table matches add column if not exists label text;
+
+
+
+-- V24 fix: players_week_id_club_id_name_key needs NULLS NOT DISTINCT.
+-- Postgres unique constraints treat every NULL as distinct from every other
+-- NULL by default. club_id is NULL for every round_robin/inter_club week's
+-- players (only inter_club_league weeks set it), so the plain V23
+-- "unique (week_id, club_id, name)" constraint provided NO duplicate-name
+-- protection at all for those formats, and broke every upsert targeting
+-- onConflict: 'week_id,name' with "there is no unique or exclusion
+-- constraint matching the ON CONFLICT specification" (Postgres requires the
+-- ON CONFLICT column list to exactly match a real constraint/index).
+alter table players drop constraint if exists players_week_id_club_id_name_key;
+alter table players add constraint players_week_id_club_id_name_key
+  unique nulls not distinct (week_id, club_id, name);
