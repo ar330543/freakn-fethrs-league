@@ -3103,6 +3103,11 @@ export default function App() {
     return teams.filter((t) => ids.has(t.id));
   }, [knockoutMatches, teams]);
 
+  const qualifiedTeamIds = useMemo(
+    () => new Set(knockoutEntrantTeams.map((t) => t.id)),
+    [knockoutEntrantTeams]
+  );
+
   // Only the top 4 of Knockout Standings advance to Semifinal/Playoffs,
   // regardless of how many teams qualified for knockouts — confirmed with
   // the organizer as the resolution for qualifier-count vs. fixed-4 bracket.
@@ -4485,6 +4490,7 @@ export default function App() {
             type="team"
             onSelectPlayer={openPlayerDashboard}
             title={week?.format === 'inter_club_league' ? 'Combined Leaderboard' : 'Standings'}
+            qualifiedTeamIds={qualifiedTeamIds}
           />
         )}
         {tab === 'knockoutStand' && (
@@ -4595,7 +4601,7 @@ function PlayerName({ name, onSelect }) {
   return <button type="button" className="playerNameLink" onClick={() => onSelect(name)}>{name}</button>;
 }
 
-function Standings({ rows, type, onSelectPlayer, awayLabel, title }) {
+function Standings({ rows, type, onSelectPlayer, awayLabel, title, qualifiedTeamIds }) {
   return (
     <div className="card">
       <h2>{title || 'Standings'}</h2>
@@ -4614,6 +4620,11 @@ function Standings({ rows, type, onSelectPlayer, awayLabel, title }) {
                     <div className="pill" style={{ background: `${s.team.color}33`, color: s.team.color }}>
                       {s.team.emoji} {s.team.name}
                     </div>
+                    {qualifiedTeamIds?.has(s.team.id) && (
+                      <span className="pill" title="Qualified for Knockouts" style={{ marginLeft: 6, background: '#22c55e33', color: '#22c55e' }}>
+                        Q
+                      </span>
+                    )}
                     <div className="teamMembers">
                       {s.team.teamPlayersList?.length
                         ? s.team.teamPlayersList.map((p, i2) => (
