@@ -1443,6 +1443,15 @@ export default function App() {
     setAdminUnlocked(false);
   }
 
+  function copyShareLink() {
+    if (!leagueId) return fail('No league is selected.');
+    const url = `${window.location.origin}${window.location.pathname}?share=${leagueId}`;
+    navigator.clipboard.writeText(url).then(
+      () => alert(`Share link copied to clipboard:\n\n${url}`),
+      () => alert(`Could not copy automatically. Here is the link:\n\n${url}`)
+    );
+  }
+
   async function newLeague() {
     if (!ensureAdmin()) return;
     const name = prompt('League name?');
@@ -4582,6 +4591,20 @@ export default function App() {
                 : 'Locked on this device.'}
             </p>
 
+            {weeks.some((w) => w.format === 'inter_club_league') && (
+              <>
+                <h3>Share Inter-Club Results</h3>
+                <p className="muted">
+                  Copies a read-only link for the visiting club — shows only this league's
+                  Inter-Club League weeks (standings, knockouts, and match scores). No editing,
+                  and no access to your other leagues, roster, or admin controls.
+                </p>
+                <div className="row">
+                  <button className="btn secondary" onClick={copyShareLink}>Copy Share Link</button>
+                </div>
+              </>
+            )}
+
             <div className="row">
               <button className="btn secondary" onClick={undo}>Undo Last Score</button>
               <button className="btn secondary" onClick={() => {
@@ -4614,8 +4637,259 @@ export default function App() {
   );
 }
 
+// Read-only page for a shared Inter-Club League link (?share=<leagueId>).
+// Fetches its own data independently of App's state, shows only that
+// league's Inter-Club League weeks (standings/knockouts/match scores), and
+// has no navigation, editing, or admin affordances of any kind.
+export function SharedLeagueView({ leagueId }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [league, setLeague] = useState(null);
+  const [weeks, setWeeks] = useState([]);
+  const [weekId, setWeekId] = useState('');
+  const [teams, setTeams] = useState([]);
+  const [teamPlayers, setTeamPlayers] = useState([]);
+  const [players, setPlayers] = useState([]);
+  const [matches, setMatches] = useState([]);
+  const [games, setGames] = useState([]);
+  const [scores, setScores] = useState([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError('');
+
+      const { data: leagueRow } = await supabase.from('leagues').select('*').eq('id', leagueId).single();
+      if (!leagueRow) {
+        if (!cancelled) { setError('This share link is invalid or the league no longer exists.'); setLoading(false); }
+        return;
+      }
+
+      const { data: weekRows } = await supabase
+        .from('weeks').select('*')
+        .eq('league_id', leagueId).eq('format', 'inter_club_league')
+        .order('created_at', { ascending: false });
+
+      if (cancelled) return;
+      setLeague(leagueRow);
+      setWeeks(weekRows || []);
+      if (weekRows?.length) {
+        setWeekId(weekRows[0].id);
+      } else {
+        setError('This league has no Inter-Club League results to show yet.');
+      }
+      setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [leagueId]);
+
+  useEffect(() => {
+    if (!weekId) return;
+    let cancelled = false;
+    (async () => {
+      const [t, tp, p, m, g, s] = await Promise.all([
+        supabase.from('teams').select('*').eq('week_id', weekId),
+        supabase.from('team_players').select('*'),
+        supabase.from('players').select('*').eq('week_id', weekId),
+        supabase.from('matches').select('*').eq('week_id', weekId).order('slot').order('court'),
+        supabase.from('match_games').select('*'),
+        supabase.from('game_scores').select('*'),
+      ]);
+      if (cancelled) return;
+      setTeams(t.data || []);
+      setTeamPlayers(tp.data || []);
+      setPlayers(p.data || []);
+      setMatches(m.data || []);
+      setGames(g.data || []);
+      setScores(s.data || []);
+    })();
+    return () => { cancelled = true; };
+  }, [weekId]);
+
+  function team(id) {
+    return teams.find((t) => t.id === id);
+  }
+
+  function playersForTeam(teamId) {
+    return teamPlayers
+      .filter((x) => x.team_id === teamId)
+      .map((x) => players.find((p) => p.id === x.player_id))
+      .filter(Boolean);
+  }
+
+  function teamMembersText(teamId) {
+    const members = playersForTeam(teamId).map((p) => p.name);
+    return members.length ? members.join(' · ') : 'No players assigned';
+  }
+
+  function playerName(id) {
+    return players.find((p) => p.id === id)?.name || '-';
+  }
+
+  const teamStandings = useMemo(() => {
+    const stats = {};
+    teams.forEach((t) => {
+      stats[t.id] = { team: t, played: 0, matchWins: 0, losses: 0, draws: 0, gameWins: 0, pointsFor: 0, pointsAgainst: 0 };
+    });
+
+    matches.filter((m) => (m.stage || 'league') === 'league').forEach((match) => {
+      const { aw, bw, ap, bp, done } = getMatchResult(match, games, scores);
+      const A = stats[match.team1_id];
+      const B = stats[match.team2_id];
+      if (!A || !B) return;
+
+      A.gameWins += aw; B.gameWins += bw;
+      A.pointsFor += ap; A.pointsAgainst += bp;
+      B.pointsFor += bp; B.pointsAgainst += ap;
+
+      if (done) {
+        A.played++; B.played++;
+        if (aw > bw) { A.matchWins++; B.losses++; }
+        else if (bw > aw) { B.matchWins++; A.losses++; }
+        else { A.draws++; B.draws++; }
+      }
+    });
+
+    return Object.values(stats)
+      .map((x) => ({ ...x, pointDiff: x.pointsFor - x.pointsAgainst, team: { ...x.team, teamPlayersList: playersForTeam(x.team.id) } }))
+      .sort((a, b) => b.matchWins - a.matchWins || b.pointDiff - a.pointDiff || b.pointsFor - a.pointsFor);
+  }, [teams, matches, games, scores, teamPlayers, players]);
+
+  const knockoutMatches = useMemo(() => matches.filter((m) => m.stage === 'knockout'), [matches]);
+
+  const knockoutStandings = useMemo(() => knockoutMatches
+    .slice()
+    .sort((a, b) => (a.bracket_order ?? 0) - (b.bracket_order ?? 0))
+    .map((match) => {
+      const winnerTeamId = getMatchResult(match, games, scores).winnerTeamId;
+      return { seed: match.bracket_order, winner: winnerTeamId ? teams.find((t) => t.id === winnerTeamId) : null };
+    }), [knockoutMatches, games, scores, teams]);
+
+  const qualifiedTeamIds = useMemo(() => {
+    const ids = new Set();
+    knockoutMatches.forEach((m) => { ids.add(m.team1_id); ids.add(m.team2_id); });
+    return ids;
+  }, [knockoutMatches]);
+
+  const matchesByStage = useMemo(() => {
+    const acc = {};
+    matches.forEach((m) => {
+      const stage = m.stage || 'league';
+      if (!acc[stage]) acc[stage] = [];
+      acc[stage].push(m);
+    });
+    return Object.entries(acc).sort(([a], [b]) => STAGE_ORDER.indexOf(b) - STAGE_ORDER.indexOf(a));
+  }, [matches]);
+
+  if (loading) {
+    return <div className="main"><div className="card"><p className="muted">Loading…</p></div></div>;
+  }
+
+  if (error) {
+    return (
+      <div className="main">
+        <div className="card">
+          <h2>{league?.name || 'Freakn Fethrs League'}</h2>
+          <div className="emptyState">{error}</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="main">
+      <div className="row" style={{ justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap' }}>
+        <div>
+          <h1 style={{ margin: 0 }}>{league?.name}</h1>
+          <p className="muted" style={{ margin: '4px 0 0' }}>Shared read-only view · Inter-Club League results</p>
+        </div>
+        {weeks.length > 1 && (
+          <select value={weekId} onChange={(e) => setWeekId(e.target.value)}>
+            {weeks.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
+          </select>
+        )}
+      </div>
+
+      <Standings rows={teamStandings} type="team" title="Combined Leaderboard" qualifiedTeamIds={qualifiedTeamIds} />
+
+      {knockoutMatches.length > 0 && (
+        <div className="card">
+          <h2>Knockout Standings</h2>
+          <div className="fireline" />
+          <table>
+            <thead><tr><th>Rank</th><th>Team</th></tr></thead>
+            <tbody>
+              {knockoutStandings.map((r) => (
+                <tr key={r.seed}>
+                  <td>{r.seed}</td>
+                  <td>{r.winner ? `${r.winner.emoji} ${r.winner.name}` : 'Not yet decided'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="sectionDivider" />
+      <h2>Match Schedule</h2>
+
+      {!matches.length && <div className="emptyState">No matches yet.</div>}
+
+      {matchesByStage.map(([stage, stageMatches]) => (
+        <div key={stage} className="setGroup">
+          <h3>{STAGE_LABELS[stage] || stage}</h3>
+          {stageMatches
+            .sort((a, b) => (a.bracket_order ?? a.slot ?? 0) - (b.bracket_order ?? b.slot ?? 0))
+            .map((match) => (
+              <div className="card" key={match.id}>
+                <h3>
+                  {match.label ? `${match.label} · ` : `Slot ${match.slot} · Court ${match.court} · `}
+                  {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
+                </h3>
+
+                <div className="teamVsBlock">
+                  <div>
+                    <div className="pill" style={{ background: `${team(match.team1_id)?.color}33`, color: team(match.team1_id)?.color }}>
+                      {team(match.team1_id)?.emoji} {team(match.team1_id)?.name}
+                    </div>
+                    <div className="teamMembers">{teamMembersText(match.team1_id)}</div>
+                  </div>
+                  <div className="scoreBig">VS</div>
+                  <div>
+                    <div className="pill" style={{ background: `${team(match.team2_id)?.color}33`, color: team(match.team2_id)?.color }}>
+                      {team(match.team2_id)?.emoji} {team(match.team2_id)?.name}
+                    </div>
+                    <div className="teamMembers">{teamMembersText(match.team2_id)}</div>
+                  </div>
+                </div>
+
+                {games
+                  .filter((g) => g.match_id === match.id)
+                  .sort((a, b) => a.game_number - b.game_number)
+                  .map((game) => {
+                    const s = scores.find((sc) => sc.game_id === game.id) || {};
+                    const played = s.score1 != null && s.score2 != null;
+                    return (
+                      <div className="game" key={game.id}>
+                        <div className="gamePair gamePairLeft">{playerName(game.t1_player1_id)} / {playerName(game.t1_player2_id)}</div>
+                        <div className="score scoreOne">{played ? s.score1 : '–'}</div>
+                        <div className="score scoreTwo">{played ? s.score2 : '–'}</div>
+                        <div className="gamePair gamePairRight">{playerName(game.t2_player1_id)} / {playerName(game.t2_player2_id)}</div>
+                      </div>
+                    );
+                  })}
+              </div>
+            ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PlayerName({ name, onSelect }) {
   if (!name) return <span>-</span>;
+  if (!onSelect) return <span>{name}</span>;
   return <button type="button" className="playerNameLink" onClick={() => onSelect(name)}>{name}</button>;
 }
 
