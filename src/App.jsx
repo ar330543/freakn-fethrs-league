@@ -10,6 +10,29 @@ const supabase = createClient(
   import.meta.env.VITE_SUPABASE_ANON_KEY
 );
 
+const ADMIN_PIN = import.meta.env.VITE_ADMIN_PIN || '';
+const ADMIN_UNLOCK_KEY = 'ff_admin_unlocked';
+
+function isAdminUnlocked() {
+  return localStorage.getItem(ADMIN_UNLOCK_KEY) === '1';
+}
+
+function requireAdmin() {
+  if (isAdminUnlocked()) return true;
+  if (!ADMIN_PIN) {
+    alert('Admin PIN is not configured for this deployment (set VITE_ADMIN_PIN). Creating/deleting leagues and weeks is blocked until it is.');
+    return false;
+  }
+  const entered = prompt('Enter admin PIN to create or delete leagues/weeks:');
+  if (entered === null) return false;
+  if (entered !== ADMIN_PIN) {
+    alert('Incorrect PIN.');
+    return false;
+  }
+  localStorage.setItem(ADMIN_UNLOCK_KEY, '1');
+  return true;
+}
+
 const STAGE_ORDER = ['league', 'knockout', 'semifinal', 'playoffs', 'grand_final', 'bronze'];
 const STAGE_LABELS = {
   league: 'League',
@@ -863,6 +886,7 @@ function buildSkillBalancedTeams(teamPlayers, count, forbiddenPairs, rankScoreBy
 
 export default function App() {
   const [tab, setTab] = useState('dashboard');
+  const [adminUnlocked, setAdminUnlocked] = useState(isAdminUnlocked());
   const [mode, setMode] = useState('auto');
   const [leagues, setLeagues] = useState([]);
   const [weeks, setWeeks] = useState([]);
@@ -1408,7 +1432,19 @@ export default function App() {
     });
   }
 
+  function ensureAdmin() {
+    const ok = requireAdmin();
+    if (ok) setAdminUnlocked(true);
+    return ok;
+  }
+
+  function lockAdmin() {
+    localStorage.removeItem(ADMIN_UNLOCK_KEY);
+    setAdminUnlocked(false);
+  }
+
   async function newLeague() {
+    if (!ensureAdmin()) return;
     const name = prompt('League name?');
     if (!name) return;
 
@@ -1424,6 +1460,7 @@ export default function App() {
 
   async function newWeek() {
     if (!leagueId) return fail('No league is selected.');
+    if (!ensureAdmin()) return;
     const name = prompt('Week name?', `Week ${weeks.length + 1}`);
     if (!name) return;
 
@@ -1490,6 +1527,7 @@ export default function App() {
   async function deleteWeek() {
     if (!weekId) return fail('No week is selected.');
     if (weeks.length <= 1) return fail('Cannot delete the only week in this league. Create another week first.');
+    if (!ensureAdmin()) return;
 
     const nextWeek = weeks.find((w) => w.id !== weekId);
     if (!confirm(`Delete ${week?.name || 'this week'}? This deletes only that week.`)) return;
@@ -1511,6 +1549,7 @@ export default function App() {
   async function deleteLeague() {
     if (!leagueId) return fail('No league is selected.');
     if (leagues.length <= 1) return fail('Cannot delete the only league. Create another league first.');
+    if (!ensureAdmin()) return;
 
     const nextLeague = leagues.find((l) => l.id !== leagueId);
     if (!confirm('Delete entire league? This removes all weeks in this league only.')) return;
@@ -3232,6 +3271,17 @@ export default function App() {
     ) || null;
   }, [matches, quickTeam1Id, quickTeam2Id]);
 
+  const quickTeamOpponentIds = useMemo(() => {
+    const map = new Map();
+    matches.forEach((match) => {
+      if (!map.has(match.team1_id)) map.set(match.team1_id, new Set());
+      if (!map.has(match.team2_id)) map.set(match.team2_id, new Set());
+      map.get(match.team1_id).add(match.team2_id);
+      map.get(match.team2_id).add(match.team1_id);
+    });
+    return map;
+  }, [matches]);
+
   const searchedPlayerMatches = useMemo(() => {
     const query = normalizePlayerName(playerGameSearch);
     if (!query) return [];
@@ -4164,7 +4214,14 @@ export default function App() {
                     >
                       <option value="">Select Team 1</option>
                       {teams.map((item) => (
-                        <option key={item.id} value={item.id}>
+                        <option
+                          key={item.id}
+                          value={item.id}
+                          disabled={
+                            item.id === quickTeam2Id ||
+                            (!!quickTeam2Id && !quickTeamOpponentIds.get(quickTeam2Id)?.has(item.id))
+                          }
+                        >
                           Set {item.set_number || 1} · {item.emoji} {item.name} — {teamMembersText(item.id)}
                         </option>
                       ))}
@@ -4182,7 +4239,10 @@ export default function App() {
                         <option
                           key={item.id}
                           value={item.id}
-                          disabled={item.id === quickTeam1Id}
+                          disabled={
+                            item.id === quickTeam1Id ||
+                            (!!quickTeam1Id && !quickTeamOpponentIds.get(quickTeam1Id)?.has(item.id))
+                          }
                         >
                           Set {item.set_number || 1} · {item.emoji} {item.name} — {teamMembersText(item.id)}
                         </option>
@@ -4290,7 +4350,7 @@ export default function App() {
                   return acc;
                 }, {})
               )
-                .sort(([a], [b]) => STAGE_ORDER.indexOf(a) - STAGE_ORDER.indexOf(b))
+                .sort(([a], [b]) => STAGE_ORDER.indexOf(b) - STAGE_ORDER.indexOf(a))
                 .map(([stage, stageMatches]) => (
                   <div key={stage} className="setGroup">
                     <h3>{STAGE_LABELS[stage] || stage}</h3>
@@ -4498,6 +4558,13 @@ export default function App() {
               <button className="btn secondary" onClick={renameWeek}>Edit Week Name</button>
               <button className="btn danger" onClick={deleteWeek}>Delete Week</button>
             </div>
+
+            <p className="muted">
+              Creating or deleting leagues/weeks requires the admin PIN.{' '}
+              {adminUnlocked
+                ? <>Unlocked on this device. <button className="btn secondary" onClick={lockAdmin}>Lock Admin</button></>
+                : 'Locked on this device.'}
+            </p>
 
             <div className="row">
               <button className="btn secondary" onClick={undo}>Undo Last Score</button>
