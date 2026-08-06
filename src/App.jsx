@@ -3287,6 +3287,16 @@ export default function App() {
     return map;
   }, [matches]);
 
+  // Fallback stats for the player dashboard when a clicked player has no
+  // cross-league Rankings entry — true for every player in an Inter-Club
+  // League week (that format is excluded from Rankings entirely, and
+  // opponent-club players never appear in any Round Robin week at all).
+  // Scoped to just the currently selected week using data already in state.
+  const currentWeekFormRows = useMemo(
+    () => (week ? computeLeagueFormStats([week], players, matches, games, scores) : []),
+    [week, players, matches, games, scores]
+  );
+
   const searchedPlayerMatches = useMemo(() => {
     const query = normalizePlayerName(playerGameSearch);
     if (!query) return [];
@@ -4585,13 +4595,21 @@ export default function App() {
         )}
       </main>
 
-      {selectedPlayerName && (
-        <PlayerDashboardModal
-          row={rankingRows.find((r) => r.normalizedName === selectedPlayerName)}
-          rank={rankingRows.findIndex((r) => r.normalizedName === selectedPlayerName) + 1}
-          onClose={() => setSelectedPlayerName(null)}
-        />
-      )}
+      {selectedPlayerName && (() => {
+        const rankingRow = rankingRows.find((r) => r.normalizedName === selectedPlayerName);
+        const row = rankingRow || currentWeekFormRows.find((r) => r.normalizedName === selectedPlayerName);
+        const rank = rankingRow
+          ? rankingRows.findIndex((r) => r.normalizedName === selectedPlayerName) + 1
+          : currentWeekFormRows.findIndex((r) => r.normalizedName === selectedPlayerName) + 1;
+        return (
+          <PlayerDashboardModal
+            row={row}
+            rank={rank}
+            weekOnly={!rankingRow}
+            onClose={() => setSelectedPlayerName(null)}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -4836,7 +4854,7 @@ function FunStats({ data, onSelectPlayer }) {
   );
 }
 
-function PlayerDashboardModal({ row, rank, onClose }) {
+function PlayerDashboardModal({ row, rank, weekOnly, onClose }) {
   return (
     <div className="modalOverlay" onClick={onClose}>
       <div className="modalCard card" onClick={(e) => e.stopPropagation()}>
@@ -4849,6 +4867,12 @@ function PlayerDashboardModal({ row, rank, onClose }) {
           <div className="emptyState">No game history yet.</div>
         ) : (
           <>
+            {weekOnly && (
+              <p className="muted">
+                Showing this week only — Inter-Club League weeks (and opponent-club players)
+                aren't included in cross-league Rankings.
+              </p>
+            )}
             <div className="grid stats">
               <div className="card stat"><div><span className="muted">Rank</span><b>{rank > 0 ? `#${rank}` : '-'}</b></div></div>
               <div className="card stat"><div><span className="muted">Rank Score</span><b>{row.rankScore.toFixed(1)}</b></div></div>
