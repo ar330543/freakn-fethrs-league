@@ -2382,15 +2382,32 @@ export default function App() {
       await deleteStageMatches(weekId, stage);
 
       if (stage === 'knockout') {
+        // Semifinal/Playoffs/Grand Final/Bronze were all seeded from this
+        // knockout round's results — redoing it invalidates every one of
+        // them, so any that already exist must go too, not just linger with
+        // the old teams still showing.
+        await deleteStageMatches(weekId, 'semifinal');
+        await deleteStageMatches(weekId, 'playoffs');
+        await deleteStageMatches(weekId, 'grand_final');
+        await deleteStageMatches(weekId, 'bronze');
         const { error: err } = await supabase
           .from('weeks').update({ knockouts_choice: 'pending', bracket_format: null, knockout_qualifier_count: null })
           .eq('id', weekId);
         if (err) throw err;
         await loadWeeks(false);
+        setSemifinalOverrides({});
+        setPlayoffsOverrides({});
+        setGrandFinalOverride({});
+        setBronzeOverride({});
       } else if (stage === 'semifinal' || stage === 'playoffs') {
+        // Grand Final/Bronze were seeded from this stage's results.
+        await deleteStageMatches(weekId, 'grand_final');
+        await deleteStageMatches(weekId, 'bronze');
         const { error: err } = await supabase.from('weeks').update({ bracket_format: null }).eq('id', weekId);
         if (err) throw err;
         await loadWeeks(false);
+        setGrandFinalOverride({});
+        setBronzeOverride({});
       }
     });
   }
@@ -3085,26 +3102,41 @@ export default function App() {
     return pairs;
   }, [knockoutQualifierCount, teamStandings, knockoutOverrides, teams]);
 
-  // Winners of the knockout matches, ordered by the ORIGINATING match's
-  // bracket_order (not re-ranked by point-diff/wins like teamStandings) —
-  // winner of seed-pair i keeps ordinal i going forward, per the confirmed
-  // "knockout standings" ranking rule.
+  // Winners of the knockout matches, ranked by each winner's ORIGINAL
+  // Combined Leaderboard position (not by which bracket slot they were
+  // seeded into) — so a lower-seeded team that upsets a higher one doesn't
+  // outrank a higher-seeded team that also won. Matches not yet decided
+  // trail at the end (in their original bracket_order) since there's no
+  // winner yet to rank.
   const knockoutStandings = useMemo(() => {
-    return knockoutMatches
-      .slice()
-      .sort((a, b) => (a.bracket_order ?? 0) - (b.bracket_order ?? 0))
-      .map((match) => {
-        const result = getMatchResult(match, games, scores);
-        const winnerTeamId = result.winnerTeamId;
-        const loserTeamId = result.loserTeamId;
-        return {
-          seed: match.bracket_order,
+    const rankByTeamId = Object.fromEntries(teamStandings.map((s, i) => [s.team.id, i]));
+
+    const decided = [];
+    const undecided = [];
+    knockoutMatches.forEach((match) => {
+      const result = getMatchResult(match, games, scores);
+      if (result.winnerTeamId) {
+        decided.push({
           match,
-          winner: winnerTeamId ? teams.find((t) => t.id === winnerTeamId) : null,
-          loser: loserTeamId ? teams.find((t) => t.id === loserTeamId) : null,
-        };
-      });
-  }, [knockoutMatches, games, scores, teams]);
+          winner: teams.find((t) => t.id === result.winnerTeamId),
+          loser: teams.find((t) => t.id === result.loserTeamId),
+          rank: rankByTeamId[result.winnerTeamId] ?? Infinity,
+        });
+      } else {
+        undecided.push({ match, winner: null, loser: null });
+      }
+    });
+
+    decided.sort((a, b) => a.rank - b.rank);
+    undecided.sort((a, b) => (a.match.bracket_order ?? 0) - (b.match.bracket_order ?? 0));
+
+    return [...decided, ...undecided].map((entry, i) => ({
+      seed: i + 1,
+      match: entry.match,
+      winner: entry.winner,
+      loser: entry.loser,
+    }));
+  }, [knockoutMatches, games, scores, teams, teamStandings]);
 
   const knockoutEntrantTeams = useMemo(() => {
     const ids = new Set();
@@ -3274,6 +3306,25 @@ export default function App() {
     () => (qualifier2Result?.loserTeamId ? teams.find((t) => t.id === qualifier2Result.loserTeamId) : null),
     [qualifier2Result, teams]
   );
+
+  const medalWinners = useMemo(() => {
+    if (!grandFinalMatch || !matchIsComplete(grandFinalMatch, games, scores)) return null;
+    const gfResult = getMatchResult(grandFinalMatch, games, scores);
+    const gold = teams.find((t) => t.id === gfResult.winnerTeamId);
+    const silver = teams.find((t) => t.id === gfResult.loserTeamId);
+    if (!gold || !silver) return null;
+
+    let bronze = null;
+    if (week?.bracket_format === 'semifinal') {
+      if (bronzeMatch && matchIsComplete(bronzeMatch, games, scores)) {
+        bronze = teams.find((t) => t.id === getMatchResult(bronzeMatch, games, scores).winnerTeamId) || null;
+      }
+    } else if (week?.bracket_format === 'playoffs') {
+      bronze = playoffsBronzeLoserTeam;
+    }
+
+    return { gold, silver, bronze };
+  }, [grandFinalMatch, bronzeMatch, playoffsBronzeLoserTeam, games, scores, teams, week?.bracket_format]);
 
   const quickSelectedMatch = useMemo(() => {
     if (!quickTeam1Id || !quickTeam2Id || quickTeam1Id === quickTeam2Id) return null;
@@ -3940,7 +3991,7 @@ export default function App() {
                           onChange={(e) => setKnockoutOverride(p.seedIndex, 'team1Id', e.target.value)}
                         >
                           <option value="">Select Team</option>
-                          {teams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                          {teams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                         </select>
                         <span>vs</span>
                         <select
@@ -3948,7 +3999,7 @@ export default function App() {
                           onChange={(e) => setKnockoutOverride(p.seedIndex, 'team2Id', e.target.value)}
                         >
                           <option value="">Select Team</option>
-                          {teams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                          {teams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                         </select>
                       </div>
                     ))}
@@ -3969,7 +4020,14 @@ export default function App() {
                         {knockoutStandings.map((r) => (
                           <tr key={r.seed}>
                             <td>{r.seed}</td>
-                            <td>{r.winner ? `${r.winner.emoji} ${r.winner.name}` : 'Not yet decided'}</td>
+                            <td>
+                      {r.winner ? (
+                        <>
+                          <div>{r.winner.emoji} {r.winner.name}</div>
+                          <div className="teamMembers">{teamMembersText(r.winner.id)}</div>
+                        </>
+                      ) : 'Not yet decided'}
+                    </td>
                           </tr>
                         ))}
                       </tbody>
@@ -3986,7 +4044,7 @@ export default function App() {
                       </div>
                     )}
 
-                    {knockoutComplete && !semifinalMatches.length && !playoffsMatches.length && (
+                    {knockoutComplete && (
                       <button className="btn danger" onClick={() => redoStage('knockout')} style={{ marginTop: 8 }}>
                         Redo Knockouts
                       </button>
@@ -4009,7 +4067,7 @@ export default function App() {
                               onChange={(e) => setSemifinalOverride(p.bracketOrder, 'team1Id', e.target.value)}
                             >
                               <option value="">Select Team</option>
-                              {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                              {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                             </select>
                             <span>vs</span>
                             <select
@@ -4017,7 +4075,7 @@ export default function App() {
                               onChange={(e) => setSemifinalOverride(p.bracketOrder, 'team2Id', e.target.value)}
                             >
                               <option value="">Select Team</option>
-                              {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                              {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                             </select>
                           </div>
                         ))}
@@ -4042,7 +4100,7 @@ export default function App() {
                                 onChange={(e) => setGrandFinalOverrideSide('team1Id', e.target.value)}
                               >
                                 <option value="">Select Team</option>
-                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                               </select>
                               <span>vs</span>
                               <select
@@ -4050,7 +4108,7 @@ export default function App() {
                                 onChange={(e) => setGrandFinalOverrideSide('team2Id', e.target.value)}
                               >
                                 <option value="">Select Team</option>
-                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                               </select>
                             </div>
                             <button className="btn green" onClick={confirmGrandFinalMatch}>Confirm Grand Final</button>
@@ -4067,7 +4125,7 @@ export default function App() {
                                 onChange={(e) => setBronzeOverrideSide('team1Id', e.target.value)}
                               >
                                 <option value="">Select Team</option>
-                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                               </select>
                               <span>vs</span>
                               <select
@@ -4075,16 +4133,14 @@ export default function App() {
                                 onChange={(e) => setBronzeOverrideSide('team2Id', e.target.value)}
                               >
                                 <option value="">Select Team</option>
-                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                               </select>
                             </div>
                             <button className="btn green" onClick={confirmBronzeMatch}>Confirm Bronze Medal Match</button>
                           </div>
                         )}
 
-                        {!grandFinalMatch && !bronzeMatch && (
-                          <button className="btn danger" onClick={() => redoStage('semifinal')}>Redo Semifinals</button>
-                        )}
+                        <button className="btn danger" onClick={() => redoStage('semifinal')}>Redo Semifinals</button>
                       </>
                     )}
                   </div>
@@ -4104,7 +4160,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(1, 'team1Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                           <span>vs</span>
                           <select
@@ -4112,7 +4168,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(1, 'team2Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                         </div>
                         <div className="row" style={{ alignItems: 'center' }}>
@@ -4122,7 +4178,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(2, 'team1Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                           <span>vs</span>
                           <select
@@ -4130,7 +4186,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(2, 'team2Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                         </div>
                         <button
@@ -4156,7 +4212,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(3, 'team1Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                            {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                           <span>vs</span>
                           <select
@@ -4164,7 +4220,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(3, 'team2Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                            {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                         </div>
                         <button className="btn green" onClick={confirmQualifier2Match} disabled={!qualifier2Pair}>
@@ -4185,7 +4241,7 @@ export default function App() {
                                 onChange={(e) => setGrandFinalOverrideSide('team1Id', e.target.value)}
                               >
                                 <option value="">Select Team</option>
-                                {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                                {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                               </select>
                               <span>vs</span>
                               <select
@@ -4193,7 +4249,7 @@ export default function App() {
                                 onChange={(e) => setGrandFinalOverrideSide('team2Id', e.target.value)}
                               >
                                 <option value="">Select Team</option>
-                                {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name}</option>)}
+                                {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                               </select>
                             </div>
                             <button className="btn green" onClick={confirmGrandFinalMatch} disabled={!playoffsGrandFinalPair}>
@@ -4208,18 +4264,38 @@ export default function App() {
                           </p>
                         )}
 
-                        {!grandFinalMatch && (
-                          <button className="btn danger" onClick={() => redoStage('playoffs')}>Redo Playoffs</button>
-                        )}
+                        <button className="btn danger" onClick={() => redoStage('playoffs')}>Redo Playoffs</button>
                       </>
                     )}
                   </div>
                 )}
 
-                {grandFinalMatch && matchIsComplete(grandFinalMatch, games, scores) && (
-                  <p className="muted">
-                    🏆 Champion: <b>{team(getMatchResult(grandFinalMatch, games, scores).winnerTeamId)?.name}</b>
-                  </p>
+                {medalWinners && (
+                  <div className="medalPodium">
+                    <h2 className="medalTitle">🏆 Champions Crowned! 🏆</h2>
+                    <div className="medalRow">
+                      <div className="medalCard medalSilver">
+                        <div className="medalEmoji">🥈</div>
+                        <div className="medalPlace">Runner-Up</div>
+                        <div className="medalTeamName">{medalWinners.silver.emoji} {medalWinners.silver.name}</div>
+                        <div className="medalTeamMembers">{teamMembersText(medalWinners.silver.id)}</div>
+                      </div>
+                      <div className="medalCard medalGold">
+                        <div className="medalEmoji">🥇</div>
+                        <div className="medalPlace">Champion</div>
+                        <div className="medalTeamName">{medalWinners.gold.emoji} {medalWinners.gold.name}</div>
+                        <div className="medalTeamMembers">{teamMembersText(medalWinners.gold.id)}</div>
+                      </div>
+                      {medalWinners.bronze && (
+                        <div className="medalCard medalBronze">
+                          <div className="medalEmoji">🥉</div>
+                          <div className="medalPlace">Bronze</div>
+                          <div className="medalTeamName">{medalWinners.bronze.emoji} {medalWinners.bronze.name}</div>
+                          <div className="medalTeamMembers">{teamMembersText(medalWinners.bronze.id)}</div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
                 )}
               </div>
             )}
@@ -4523,7 +4599,14 @@ export default function App() {
                 {knockoutStandings.map((r) => (
                   <tr key={r.seed}>
                     <td>{r.seed}</td>
-                    <td>{r.winner ? `${r.winner.emoji} ${r.winner.name}` : 'Not yet decided'}</td>
+                    <td>
+                      {r.winner ? (
+                        <>
+                          <div>{r.winner.emoji} {r.winner.name}</div>
+                          <div className="teamMembers">{teamMembersText(r.winner.id)}</div>
+                        </>
+                      ) : 'Not yet decided'}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -4758,13 +4841,27 @@ export function SharedLeagueView({ leagueId }) {
 
   const knockoutMatches = useMemo(() => matches.filter((m) => m.stage === 'knockout'), [matches]);
 
-  const knockoutStandings = useMemo(() => knockoutMatches
-    .slice()
-    .sort((a, b) => (a.bracket_order ?? 0) - (b.bracket_order ?? 0))
-    .map((match) => {
+  // Ranked by each winner's original Combined Leaderboard position, not by
+  // bracket slot — see the matching comment in App's knockoutStandings.
+  const knockoutStandings = useMemo(() => {
+    const rankByTeamId = Object.fromEntries(teamStandings.map((s, i) => [s.team.id, i]));
+
+    const decided = [];
+    const undecided = [];
+    knockoutMatches.forEach((match) => {
       const winnerTeamId = getMatchResult(match, games, scores).winnerTeamId;
-      return { seed: match.bracket_order, winner: winnerTeamId ? teams.find((t) => t.id === winnerTeamId) : null };
-    }), [knockoutMatches, games, scores, teams]);
+      if (winnerTeamId) {
+        decided.push({ winner: teams.find((t) => t.id === winnerTeamId), rank: rankByTeamId[winnerTeamId] ?? Infinity });
+      } else {
+        undecided.push({ match, winner: null });
+      }
+    });
+
+    decided.sort((a, b) => a.rank - b.rank);
+    undecided.sort((a, b) => (a.match.bracket_order ?? 0) - (b.match.bracket_order ?? 0));
+
+    return [...decided, ...undecided].map((entry, i) => ({ seed: i + 1, winner: entry.winner }));
+  }, [knockoutMatches, games, scores, teams, teamStandings]);
 
   const qualifiedTeamIds = useMemo(() => {
     const ids = new Set();
@@ -4781,6 +4878,32 @@ export function SharedLeagueView({ leagueId }) {
     });
     return Object.entries(acc).sort(([a], [b]) => STAGE_ORDER.indexOf(b) - STAGE_ORDER.indexOf(a));
   }, [matches]);
+
+  const week = weeks.find((w) => w.id === weekId) || null;
+  const grandFinalMatch = useMemo(() => matches.find((m) => m.stage === 'grand_final') || null, [matches]);
+  const bronzeMatch = useMemo(() => matches.find((m) => m.stage === 'bronze') || null, [matches]);
+  const qualifier2Match = useMemo(() => matches.find((m) => m.stage === 'playoffs' && m.bracket_order === 3) || null, [matches]);
+
+  const medalWinners = useMemo(() => {
+    if (!grandFinalMatch || !matchIsComplete(grandFinalMatch, games, scores)) return null;
+    const gfResult = getMatchResult(grandFinalMatch, games, scores);
+    const gold = teams.find((t) => t.id === gfResult.winnerTeamId);
+    const silver = teams.find((t) => t.id === gfResult.loserTeamId);
+    if (!gold || !silver) return null;
+
+    let bronze = null;
+    if (week?.bracket_format === 'semifinal') {
+      if (bronzeMatch && matchIsComplete(bronzeMatch, games, scores)) {
+        bronze = teams.find((t) => t.id === getMatchResult(bronzeMatch, games, scores).winnerTeamId) || null;
+      }
+    } else if (week?.bracket_format === 'playoffs') {
+      if (qualifier2Match && matchIsComplete(qualifier2Match, games, scores)) {
+        bronze = teams.find((t) => t.id === getMatchResult(qualifier2Match, games, scores).loserTeamId) || null;
+      }
+    }
+
+    return { gold, silver, bronze };
+  }, [grandFinalMatch, bronzeMatch, qualifier2Match, games, scores, teams, week?.bracket_format]);
 
   if (loading) {
     return <div className="main"><div className="card"><p className="muted">Loading…</p></div></div>;
@@ -4811,6 +4934,34 @@ export function SharedLeagueView({ leagueId }) {
         )}
       </div>
 
+      {medalWinners && (
+        <div className="medalPodium">
+          <h2 className="medalTitle">🏆 Champions Crowned! 🏆</h2>
+          <div className="medalRow">
+            <div className="medalCard medalSilver">
+              <div className="medalEmoji">🥈</div>
+              <div className="medalPlace">Runner-Up</div>
+              <div className="medalTeamName">{medalWinners.silver.emoji} {medalWinners.silver.name}</div>
+              <div className="medalTeamMembers">{teamMembersText(medalWinners.silver.id)}</div>
+            </div>
+            <div className="medalCard medalGold">
+              <div className="medalEmoji">🥇</div>
+              <div className="medalPlace">Champion</div>
+              <div className="medalTeamName">{medalWinners.gold.emoji} {medalWinners.gold.name}</div>
+              <div className="medalTeamMembers">{teamMembersText(medalWinners.gold.id)}</div>
+            </div>
+            {medalWinners.bronze && (
+              <div className="medalCard medalBronze">
+                <div className="medalEmoji">🥉</div>
+                <div className="medalPlace">Bronze</div>
+                <div className="medalTeamName">{medalWinners.bronze.emoji} {medalWinners.bronze.name}</div>
+                <div className="medalTeamMembers">{teamMembersText(medalWinners.bronze.id)}</div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       <Standings rows={teamStandings} type="team" title="Combined Leaderboard" qualifiedTeamIds={qualifiedTeamIds} />
 
       {knockoutMatches.length > 0 && (
@@ -4823,7 +4974,14 @@ export function SharedLeagueView({ leagueId }) {
               {knockoutStandings.map((r) => (
                 <tr key={r.seed}>
                   <td>{r.seed}</td>
-                  <td>{r.winner ? `${r.winner.emoji} ${r.winner.name}` : 'Not yet decided'}</td>
+                  <td>
+                    {r.winner ? (
+                      <>
+                        <div>{r.winner.emoji} {r.winner.name}</div>
+                        <div className="teamMembers">{teamMembersText(r.winner.id)}</div>
+                      </>
+                    ) : 'Not yet decided'}
+                  </td>
                 </tr>
               ))}
             </tbody>
