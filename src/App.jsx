@@ -564,7 +564,7 @@ function computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRow
 
 const MIN_DUO_GAMES = 3;
 
-function computeFunStats(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows) {
+function computeFunStats(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows, teamPlayersRows = []) {
   const playerStats = computeLeagueFormStats(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows);
   const { weekOrder, orderableGames, normalizedNameById, displayNameByNormalized } =
     buildLeagueGameContext(weeksInScope, playersRows, matchesRows, gamesRows, scoresRows);
@@ -670,18 +670,56 @@ function computeFunStats(weeksInScope, playersRows, matchesRows, gamesRows, scor
     if (!closestMatch || margin < closestMatch.margin) closestMatch = entry;
   });
 
-  return { hotStreaks, bestEverStreaks, mostActive, mostLoyal, mostImproved, bestDuo, biggestBlowout, closestMatch };
+  // Weekly knockout championships (Round Robin's top-4 Semifinal/Bronze/
+  // Grand Final bracket) — every player on the Grand Final winning team's
+  // roster gets credit for that week's title, same crediting rule as the
+  // Overall Standings bonus points in computeOverallStatsForWeeks.
+  const weekIdsInScope = new Set(weeksInScope.map((w) => w.id));
+  const playerNameById = Object.fromEntries(playersRows.map((p) => [p.id, p.name]));
+  const teamPlayerIdsByTeam = {};
+  teamPlayersRows.forEach((tp) => {
+    if (!teamPlayerIdsByTeam[tp.team_id]) teamPlayerIdsByTeam[tp.team_id] = [];
+    teamPlayerIdsByTeam[tp.team_id].push(tp.player_id);
+  });
+
+  const titleCounts = {};
+  matchesRows
+    .filter((m) => m.stage === 'grand_final' && weekIdsInScope.has(m.week_id))
+    .forEach((match) => {
+      const result = getMatchResult(match, gamesRows, scoresRows);
+      if (!result.winnerTeamId) return;
+      (teamPlayerIdsByTeam[result.winnerTeamId] || []).forEach((playerId) => {
+        const name = playerNameById[playerId];
+        if (!name) return;
+        const key = normalizePlayerName(name);
+        if (!titleCounts[key]) titleCounts[key] = { name, titles: 0 };
+        titleCounts[key].titles += 1;
+      });
+    });
+
+  const tournamentChampions = Object.values(titleCounts)
+    .sort((a, b) => b.titles - a.titles || a.name.localeCompare(b.name))
+    .slice(0, 5)
+    .map((t) => ({ name: t.name, value: t.titles }));
+
+  return { hotStreaks, bestEverStreaks, mostActive, mostLoyal, mostImproved, bestDuo, biggestBlowout, closestMatch, tournamentChampions };
 }
 
 async function fetchFormRawData(weekIds) {
-  if (!weekIds.length) return { playersRows: [], matchesRows: [], gamesRows: [], scoresRows: [] };
+  if (!weekIds.length) return { playersRows: [], matchesRows: [], gamesRows: [], scoresRows: [], teamPlayersRows: [] };
 
-  const [playersRes, matchesRes] = await Promise.all([
+  const [playersRes, matchesRes, teamsRes] = await Promise.all([
     supabase.from('players').select('id, week_id, name, created_at').in('week_id', weekIds),
-    supabase.from('matches').select('id, week_id, slot, court, set_number').in('week_id', weekIds),
+    // stage/team1_id/team2_id are needed to identify weekly-knockout Grand
+    // Final winners for the Fun Stats "Tournament Champions" leaderboard —
+    // harmless extra columns for the other two callers of this helper
+    // (Rankings, team-generation history), which just ignore them.
+    supabase.from('matches').select('id, week_id, slot, court, set_number, stage, team1_id, team2_id').in('week_id', weekIds),
+    supabase.from('teams').select('id').in('week_id', weekIds),
   ]);
   if (playersRes.error) throw playersRes.error;
   if (matchesRes.error) throw matchesRes.error;
+  if (teamsRes.error) throw teamsRes.error;
 
   const matchIds = (matchesRes.data || []).map((m) => m.id);
   const gamesRes = matchIds.length
@@ -695,11 +733,18 @@ async function fetchFormRawData(weekIds) {
     : { data: [], error: null };
   if (scoresRes.error) throw scoresRes.error;
 
+  const teamIds = (teamsRes.data || []).map((t) => t.id);
+  const teamPlayersRes = teamIds.length
+    ? await supabase.from('team_players').select('team_id, player_id').in('team_id', teamIds)
+    : { data: [], error: null };
+  if (teamPlayersRes.error) throw teamPlayersRes.error;
+
   return {
     playersRows: playersRes.data || [],
     matchesRows: matchesRes.data || [],
     gamesRows: gamesRes.data || [],
     scoresRows: scoresRes.data || [],
+    teamPlayersRows: teamPlayersRes.data || [],
   };
 }
 
@@ -1999,12 +2044,22 @@ export default function App() {
     }
 
     const raw = await fetchFormRawData(leagueWeeks.map((item) => item.id));
-    setFunStats(computeFunStats(leagueWeeks, raw.playersRows, raw.matchesRows, raw.gamesRows, raw.scoresRows));
+    setFunStats(computeFunStats(leagueWeeks, raw.playersRows, raw.matchesRows, raw.gamesRows, raw.scoresRows, raw.teamPlayersRows));
   }
 
   async function openPlayerDashboard(rawName) {
     setSelectedPlayerName(normalizePlayerName(rawName));
     await loadLeagueRankings();
+  }
+
+  // Jumps to the Tournament Progress card (Semifinals/Bronze/Grand Final)
+  // inside the Matches tab from the Matches/Standings/Bracket quick nav —
+  // switches tab first if needed, then waits a frame for it to render.
+  function scrollToBracket() {
+    setTab('matches');
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      document.getElementById('tournamentProgress')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }));
   }
 
   function findTeamDefsWithAvoidance(count, historicalPairs) {
@@ -2331,7 +2386,12 @@ export default function App() {
   async function chooseKnockouts(choice) {
     if (!weekId) return fail('No week is selected.');
     await act(async () => {
-      const { error: err } = await supabase.from('weeks').update({ knockouts_choice: choice }).eq('id', weekId);
+      const patch = { knockouts_choice: choice };
+      // Round Robin has no Knockouts pre-round or Semifinal-vs-Playoffs
+      // choice — it's always a fixed top-4 Semifinal + Bronze bracket, so
+      // lock the bracket format in as soon as "yes" is chosen.
+      if (choice === 'yes' && week?.format === 'round_robin') patch.bracket_format = 'semifinal';
+      const { error: err } = await supabase.from('weeks').update(patch).eq('id', weekId);
       if (err) throw err;
       await loadWeeks(false);
     });
@@ -2715,6 +2775,7 @@ export default function App() {
       }))
       .sort((a, b) =>
         (b.wins || 0) - (a.wins || 0) ||
+        (b.bonusPoints || 0) - (a.bonusPoints || 0) ||
         (b.pointDiff || 0) - (a.pointDiff || 0) ||
         (b.pointsFor || 0) - (a.pointsFor || 0) ||
         a.player.localeCompare(b.player)
@@ -2724,15 +2785,18 @@ export default function App() {
   async function computeOverallStatsForWeeks(weekIds) {
     if (!weekIds.length) return [];
 
-    const [pRes, mRes] = await Promise.all([
+    const [pRes, mRes, tRes] = await Promise.all([
       supabase.from('players').select('*').in('week_id', weekIds),
       supabase.from('matches').select('*').in('week_id', weekIds),
+      supabase.from('teams').select('*').in('week_id', weekIds),
     ]);
     if (pRes.error) throw pRes.error;
     if (mRes.error) throw mRes.error;
+    if (tRes.error) throw tRes.error;
 
     const allPlayers = pRes.data || [];
     const allMatches = mRes.data || [];
+    const allTeams = tRes.data || [];
     const matchIds = allMatches.map((m) => m.id);
     const playerById = Object.fromEntries(allPlayers.map((p) => [p.id, p]));
 
@@ -2750,11 +2814,17 @@ export default function App() {
       : { data: [], error: null };
     if (sErr) throw sErr;
 
+    const teamIds = allTeams.map((t) => t.id);
+    const { data: allTeamPlayers, error: tpErr } = teamIds.length
+      ? await supabase.from('team_players').select('*').in('team_id', teamIds)
+      : { data: [], error: null };
+    if (tpErr) throw tpErr;
+
     const scoreByGame = Object.fromEntries((allScores || []).map((s) => [s.game_id, s]));
     const stats = {};
 
     function ensure(name) {
-      if (!stats[name]) stats[name] = { player: name, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0 };
+      if (!stats[name]) stats[name] = { player: name, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0, bonusPoints: 0, titles: 0 };
       return stats[name];
     }
 
@@ -2787,6 +2857,34 @@ export default function App() {
         else if (s1 > s2) row.losses++;
       });
     });
+
+    // Weekly knockout championship bonus points (Round Robin's weekly
+    // Semifinal/Bronze/Grand Final bracket): Grand Final winner +5,
+    // runner-up +3, Bronze Medal Match winner +1 — credited to every player
+    // on the team's roster, not just whoever played the deciding game.
+    const BONUS_POINTS = {
+      grand_final: { winner: 5, loser: 3 },
+      bronze: { winner: 1, loser: 0 },
+    };
+    allMatches
+      .filter((m) => m.stage === 'grand_final' || m.stage === 'bronze')
+      .forEach((match) => {
+        const result = getMatchResult(match, allGames || [], allScores || []);
+        if (!result.winnerTeamId) return;
+        const points = BONUS_POINTS[match.stage];
+
+        const rosterFor = (teamId) => (allTeamPlayers || [])
+          .filter((tp) => tp.team_id === teamId)
+          .map((tp) => playerById[tp.player_id])
+          .filter(Boolean);
+
+        rosterFor(result.winnerTeamId).forEach((p) => {
+          const row = ensure(p.name);
+          row.bonusPoints += points.winner;
+          if (match.stage === 'grand_final') row.titles += 1;
+        });
+        if (points.loser) rosterFor(result.loserTeamId).forEach((p) => { ensure(p.name).bonusPoints += points.loser; });
+      });
 
     return rankOverall(Object.values(stats));
   }
@@ -2994,10 +3092,12 @@ export default function App() {
       stats[p.id] = { id: p.id, player: p.name, isOpponent: p.is_opponent, played: 0, wins: 0, losses: 0, pointsFor: 0, pointsAgainst: 0 };
     });
 
-    const leagueMatchIds = week?.format === 'inter_club_league'
-      ? new Set(matches.filter((m) => (m.stage || 'league') === 'league').map((m) => m.id))
-      : null;
-    const standingsGames = leagueMatchIds ? games.filter((g) => leagueMatchIds.has(g.match_id)) : games;
+    // Always scoped to the league stage — once a week has a knockout bracket
+    // (Inter-Club League's Knockouts/Semifinal/Playoffs, or Round Robin's
+    // weekly Semifinal/Bronze/Grand Final), those matches must not leak into
+    // the week's regular-season standings.
+    const leagueMatchIds = new Set(matches.filter((m) => (m.stage || 'league') === 'league').map((m) => m.id));
+    const standingsGames = games.filter((g) => leagueMatchIds.has(g.match_id));
 
     standingsGames.forEach((game) => {
       const score = scoreFor(game.id);
@@ -3036,9 +3136,9 @@ export default function App() {
       stats[t.id] = { team: t, played: 0, matchWins: 0, losses: 0, draws: 0, gameWins: 0, pointsFor: 0, pointsAgainst: 0 };
     });
 
-    const standingsMatches = week?.format === 'inter_club_league'
-      ? matches.filter((m) => (m.stage || 'league') === 'league')
-      : matches;
+    // Always scoped to the league stage — see the matching note in
+    // playerStandings above.
+    const standingsMatches = matches.filter((m) => (m.stage || 'league') === 'league');
 
     standingsMatches.forEach((match) => {
       const { aw, bw, ap, bp, done } = getMatchResult(match, games, scores);
@@ -3144,18 +3244,15 @@ export default function App() {
     return teams.filter((t) => ids.has(t.id));
   }, [knockoutMatches, teams]);
 
-  const qualifiedTeamIds = useMemo(
-    () => new Set(knockoutEntrantTeams.map((t) => t.id)),
-    [knockoutEntrantTeams]
-  );
-
   // Only the top 4 of Knockout Standings advance to Semifinal/Playoffs,
   // regardless of how many teams qualified for knockouts — confirmed with
   // the organizer as the resolution for qualifier-count vs. fixed-4 bracket.
-  const top4KnockoutWinners = useMemo(
-    () => knockoutStandings.filter((r) => r.winner).slice(0, 4).map((r) => r.winner),
-    [knockoutStandings]
-  );
+  // Round Robin has no Knockouts pre-round at all — it's always exactly the
+  // top 4 of that week's League Standings feeding straight into Semifinals.
+  const top4KnockoutWinners = useMemo(() => {
+    if (week?.format === 'round_robin') return teamStandings.slice(0, 4).map((s) => s.team);
+    return knockoutStandings.filter((r) => r.winner).slice(0, 4).map((r) => r.winner);
+  }, [week?.format, teamStandings, knockoutStandings]);
 
   // --- Semifinal path ---
   const semifinalDefaultPairs = useMemo(() => {
@@ -3211,6 +3308,19 @@ export default function App() {
     semifinalMatches.forEach((m) => { ids.add(m.team1_id); ids.add(m.team2_id); });
     return teams.filter((t) => ids.has(t.id));
   }, [semifinalMatches, teams]);
+
+  // Round Robin never creates a preliminary "knockout" stage match (see
+  // top4KnockoutWinners above), so knockoutEntrantTeams always stays empty
+  // for it — the "Q" badge instead marks the top 4 that reached Semifinals.
+  const qualifiedTeamIds = useMemo(() => {
+    const source = week?.format === 'round_robin' ? semifinalEntrantTeams : knockoutEntrantTeams;
+    return new Set(source.map((t) => t.id));
+  }, [week?.format, semifinalEntrantTeams, knockoutEntrantTeams]);
+
+  // Override dropdown pool for the Semifinal seeding — Inter-Club League
+  // restricts overrides to teams that played the Knockouts pre-round, Round
+  // Robin (no pre-round) restricts to the fixed top-4 from League Standings.
+  const semifinalOverridePool = week?.format === 'round_robin' ? top4KnockoutWinners : knockoutEntrantTeams;
 
   // --- Playoffs path ---
   const playoffsDefaultQ1E = useMemo(() => {
@@ -3404,6 +3514,19 @@ export default function App() {
     ['funstats', 'Fun Stats', Sparkles],
     ['settings', 'Settings', Settings],
   ];
+
+  // Same condition that gates the Tournament Progress card on the Matches
+  // tab (see below) — used to disable the "Bracket" quick-nav pill when
+  // there's nothing to jump to yet.
+  const hasBracketSection = (week?.format === 'inter_club_league' || week?.format === 'round_robin') && leagueMatches.length > 0;
+
+  const quickNav = (
+    <div className="row quickNav">
+      <button className={tab === 'matches' ? 'btn' : 'btn secondary'} onClick={() => setTab('matches')}>Matches</button>
+      <button className={tab === 'team' ? 'btn' : 'btn secondary'} onClick={() => setTab('team')}>Standings</button>
+      <button className="btn secondary" onClick={scrollToBracket} disabled={!hasBracketSection}>Bracket</button>
+    </div>
+  );
 
   return (
     <div className="app">
@@ -3923,6 +4046,7 @@ export default function App() {
 
         {tab === 'matches' && (
           <div className="card">
+            {quickNav}
             <h2>Matches & Scores</h2>
             <p className="muted">
               Use the team dropdowns, search by player, or continue using the full match list.
@@ -3946,17 +4070,26 @@ export default function App() {
               </div>
             )}
 
-            {week?.format === 'inter_club_league' && leagueMatches.length > 0 && (
-              <div className="card">
+            {(week?.format === 'inter_club_league' || week?.format === 'round_robin') && leagueMatches.length > 0 && (
+              <div className="card" id="tournamentProgress">
                 <h3>Tournament Progress</h3>
 
                 {!leagueComplete && (
                   <p className="muted">Finish entering every league score to continue to knockouts.</p>
                 )}
 
-                {leagueComplete && week?.knockouts_choice === 'pending' && (
+                {leagueComplete && week?.knockouts_choice === 'pending' && week?.format === 'round_robin' && teamStandings.length < 4 && (
+                  <p className="muted">Need at least 4 teams with completed matches to run a weekly knockout.</p>
+                )}
+
+                {leagueComplete && week?.knockouts_choice === 'pending' && (week?.format !== 'round_robin' || teamStandings.length >= 4) && (
                   <div className="card">
                     <h4>Run Knockouts?</h4>
+                    <p className="muted">
+                      {week?.format === 'round_robin'
+                        ? 'Play a Semifinal + Bronze Medal Match + Grand Final between the top 4 teams to crown a weekly champion?'
+                        : ''}
+                    </p>
                     <div className="row">
                       <button className="btn" onClick={() => chooseKnockouts('yes')}>Yes</button>
                       <button className="btn secondary" onClick={() => chooseKnockouts('no')}>No</button>
@@ -3965,10 +4098,18 @@ export default function App() {
                 )}
 
                 {week?.knockouts_choice === 'no' && (
-                  <p className="muted">No knockouts — the Combined Leaderboard is final for this week.</p>
+                  <p className="muted">
+                    No knockouts — {week?.format === 'inter_club_league' ? 'the Combined Leaderboard' : 'the standings'} are final for this week.
+                  </p>
                 )}
 
-                {week?.knockouts_choice === 'yes' && knockoutMatches.length === 0 && (
+                {week?.format === 'round_robin' && week?.knockouts_choice === 'yes' && (
+                  <button className="btn danger" onClick={() => redoStage('knockout')} style={{ marginBottom: 8 }}>
+                    Redo Knockout Decision
+                  </button>
+                )}
+
+                {week?.format === 'inter_club_league' && week?.knockouts_choice === 'yes' && knockoutMatches.length === 0 && (
                   <div className="card">
                     <h4>Knockout Seeding</h4>
                     <p className="muted">Ranks come from the Combined Leaderboard: rank 1 vs last, rank 2 vs 2nd-last, and so on.</p>
@@ -4055,7 +4196,10 @@ export default function App() {
                 {week?.bracket_format === 'semifinal' && (
                   <div className="card">
                     <h4>Semifinals</h4>
-                    <p className="muted">Rank 1 vs Rank 4, Rank 2 vs Rank 3 (from Knockout Standings). Override pool: every team that played knockouts.</p>
+                    <p className="muted">
+                      Rank 1 vs Rank 4, Rank 2 vs Rank 3 (from {week?.format === 'round_robin' ? 'League Standings' : 'Knockout Standings'}).
+                      Override pool: {week?.format === 'round_robin' ? 'the top 4 teams' : 'every team that played knockouts'}.
+                    </p>
 
                     {!semifinalMatches.length ? (
                       <>
@@ -4067,7 +4211,7 @@ export default function App() {
                               onChange={(e) => setSemifinalOverride(p.bracketOrder, 'team1Id', e.target.value)}
                             >
                               <option value="">Select Team</option>
-                              {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                              {semifinalOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                             </select>
                             <span>vs</span>
                             <select
@@ -4075,7 +4219,7 @@ export default function App() {
                               onChange={(e) => setSemifinalOverride(p.bracketOrder, 'team2Id', e.target.value)}
                             >
                               <option value="">Select Team</option>
-                              {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                              {semifinalOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                             </select>
                           </div>
                         ))}
@@ -4483,43 +4627,88 @@ export default function App() {
                   </div>
                 ))
             ) : (
-              Object.entries(
-                matches.reduce((acc, m) => {
-                  const setNumber = m.set_number || 1;
-                  if (!acc[setNumber]) acc[setNumber] = [];
-                  acc[setNumber].push(m);
-                  return acc;
-                }, {})
-              )
-                .sort(([a], [b]) => Number(a) - Number(b))
-                .map(([setNumber, setMatches]) => (
-                  <div key={setNumber} className="setGroup">
-                    <h3>Set {setNumber}</h3>
-                    {setMatches.map((match) => (
-                      <div className="card" key={match.id}>
-                        <div className="row">
-                          <h3>
-                            Slot {match.slot} · Court {match.court} · {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
-                          </h3>
-                          <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
-                            Reset Match Scores
-                          </button>
-                        </div>
+              <>
+                {Object.entries(
+                  matches.filter((m) => (m.stage || 'league') === 'league').reduce((acc, m) => {
+                    const setNumber = m.set_number || 1;
+                    if (!acc[setNumber]) acc[setNumber] = [];
+                    acc[setNumber].push(m);
+                    return acc;
+                  }, {})
+                )
+                  .sort(([a], [b]) => Number(a) - Number(b))
+                  .map(([setNumber, setMatches]) => (
+                    <div key={`set-${setNumber}`} className="setGroup">
+                      <h3>Set {setNumber}</h3>
+                      {setMatches.map((match) => (
+                        <div className="card" key={match.id}>
+                          <div className="row">
+                            <h3>
+                              Slot {match.slot} · Court {match.court} · {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
+                            </h3>
+                            <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
+                              Reset Match Scores
+                            </button>
+                          </div>
 
-                        <div className="teamVsBlock">
-                          <TeamLabel teamId={match.team1_id} />
-                          <div className="scoreBig">VS</div>
-                          <TeamLabel teamId={match.team2_id} />
-                        </div>
+                          <div className="teamVsBlock">
+                            <TeamLabel teamId={match.team1_id} />
+                            <div className="scoreBig">VS</div>
+                            <TeamLabel teamId={match.team2_id} />
+                          </div>
 
-                        {games
-                          .filter((game) => game.match_id === match.id)
-                          .sort((a, b) => a.game_number - b.game_number)
-                          .map((game) => renderGameScoreEditor(game))}
-                      </div>
-                    ))}
-                  </div>
-                ))
+                          {games
+                            .filter((game) => game.match_id === match.id)
+                            .sort((a, b) => a.game_number - b.game_number)
+                            .map((game) => renderGameScoreEditor(game))}
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+
+                {/* Weekly knockout bracket matches (Round Robin) — grouped by
+                    stage like Inter-Club League's bracket, not by set. */}
+                {Object.entries(
+                  matches.filter((m) => (m.stage || 'league') !== 'league').reduce((acc, m) => {
+                    const stage = m.stage || 'league';
+                    if (!acc[stage]) acc[stage] = [];
+                    acc[stage].push(m);
+                    return acc;
+                  }, {})
+                )
+                  .sort(([a], [b]) => STAGE_ORDER.indexOf(b) - STAGE_ORDER.indexOf(a))
+                  .map(([stage, stageMatches]) => (
+                    <div key={stage} className="setGroup">
+                      <h3>{STAGE_LABELS[stage] || stage}</h3>
+                      {stageMatches
+                        .sort((a, b) => (a.bracket_order ?? a.slot ?? 0) - (b.bracket_order ?? b.slot ?? 0))
+                        .map((match) => (
+                          <div className="card" key={match.id}>
+                            <div className="row">
+                              <h3>
+                                {match.label ? `${match.label} · ` : `Slot ${match.slot} · Court ${match.court} · `}
+                                {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
+                              </h3>
+                              <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
+                                Reset Match Scores
+                              </button>
+                            </div>
+
+                            <div className="teamVsBlock">
+                              <TeamLabel teamId={match.team1_id} />
+                              <div className="scoreBig">VS</div>
+                              <TeamLabel teamId={match.team2_id} />
+                            </div>
+
+                            {games
+                              .filter((game) => game.match_id === match.id)
+                              .sort((a, b) => a.game_number - b.game_number)
+                              .map((game) => renderGameScoreEditor(game))}
+                          </div>
+                        ))}
+                    </div>
+                  ))}
+              </>
             )}
           </div>
         )}
@@ -4580,13 +4769,43 @@ export default function App() {
 
 
         {tab === 'team' && (
-          <Standings
-            rows={teamStandings}
-            type="team"
-            onSelectPlayer={openPlayerDashboard}
-            title={week?.format === 'inter_club_league' ? 'Combined Leaderboard' : 'Standings'}
-            qualifiedTeamIds={qualifiedTeamIds}
-          />
+          <>
+            <div className="card">{quickNav}</div>
+            {medalWinners && (
+              <div className="medalPodium">
+                <h2 className="medalTitle">🏆 Champions Crowned! 🏆</h2>
+                <div className="medalRow">
+                  <div className="medalCard medalSilver">
+                    <div className="medalEmoji">🥈</div>
+                    <div className="medalPlace">Runner-Up</div>
+                    <div className="medalTeamName">{medalWinners.silver.emoji} {medalWinners.silver.name}</div>
+                    <div className="medalTeamMembers">{teamMembersText(medalWinners.silver.id)}</div>
+                  </div>
+                  <div className="medalCard medalGold">
+                    <div className="medalEmoji">🥇</div>
+                    <div className="medalPlace">Champion</div>
+                    <div className="medalTeamName">{medalWinners.gold.emoji} {medalWinners.gold.name}</div>
+                    <div className="medalTeamMembers">{teamMembersText(medalWinners.gold.id)}</div>
+                  </div>
+                  {medalWinners.bronze && (
+                    <div className="medalCard medalBronze">
+                      <div className="medalEmoji">🥉</div>
+                      <div className="medalPlace">Bronze</div>
+                      <div className="medalTeamName">{medalWinners.bronze.emoji} {medalWinners.bronze.name}</div>
+                      <div className="medalTeamMembers">{teamMembersText(medalWinners.bronze.id)}</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+            <Standings
+              rows={teamStandings}
+              type="team"
+              onSelectPlayer={openPlayerDashboard}
+              title={week?.format === 'inter_club_league' ? 'Combined Leaderboard' : 'Standings'}
+              qualifiedTeamIds={qualifiedTeamIds}
+            />
+          </>
         )}
         {tab === 'knockoutStand' && (
           <div className="card">
@@ -5095,7 +5314,12 @@ function Standings({ rows, type, onSelectPlayer, awayLabel, title, qualifiedTeam
       ) : (
         <table>
           <thead>
-            <tr><th>Rank</th><th>Player</th><th>Played</th><th>Wins</th><th>Losses</th><th>PF</th><th>PA</th><th>Diff</th><th>Win %</th></tr>
+            <tr>
+              <th>Rank</th><th>Player</th><th>Played</th><th>Wins</th><th>Losses</th>
+              {rows.some((s) => s.titles !== undefined) && <th title="Weekly knockout tournaments won">Titles</th>}
+              {rows.some((s) => s.bonusPoints !== undefined) && <th title="Weekly knockout championship bonus points">Bonus</th>}
+              <th>PF</th><th>PA</th><th>Diff</th><th>Win %</th>
+            </tr>
           </thead>
           <tbody>
             {rows.map((s, i) => (
@@ -5112,6 +5336,8 @@ function Standings({ rows, type, onSelectPlayer, awayLabel, title, qualifiedTeam
                 <td>{s.played}</td>
                 <td>{s.wins}</td>
                 <td>{s.losses}</td>
+                {rows.some((r) => r.titles !== undefined) && <td>{s.titles || 0}</td>}
+                {rows.some((r) => r.bonusPoints !== undefined) && <td>{s.bonusPoints || 0}</td>}
                 <td>{s.pointsFor}</td>
                 <td>{s.pointsAgainst}</td>
                 <td className={s.pointDiff >= 0 ? 'diffpos' : 'diffneg'}>{s.pointDiff > 0 ? '+' : ''}{s.pointDiff}</td>
@@ -5199,7 +5425,7 @@ function FunStats({ data, onSelectPlayer }) {
     );
   }
 
-  const { hotStreaks, bestEverStreaks, mostActive, mostLoyal, mostImproved, bestDuo, biggestBlowout, closestMatch } = data;
+  const { hotStreaks, bestEverStreaks, mostActive, mostLoyal, mostImproved, bestDuo, biggestBlowout, closestMatch, tournamentChampions } = data;
 
   return (
     <div className="card">
@@ -5216,6 +5442,8 @@ function FunStats({ data, onSelectPlayer }) {
           empty="No games played yet." renderValue={(r) => `${r.value} games`} />
         <Leaderboard title="Most Loyal" emoji="🎽" rows={mostLoyal} onSelectPlayer={onSelectPlayer}
           empty="No weeks played yet." renderValue={(r) => `${r.value} weeks`} />
+        <Leaderboard title="Tournament Champions" emoji="🏆" rows={tournamentChampions || []} onSelectPlayer={onSelectPlayer}
+          empty="No weekly knockout has been won yet." renderValue={(r) => `${r.value} title${r.value === 1 ? '' : 's'}`} />
       </div>
 
       <div className="card">
