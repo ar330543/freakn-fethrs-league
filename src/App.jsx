@@ -2388,9 +2388,10 @@ export default function App() {
     await act(async () => {
       const patch = { knockouts_choice: choice };
       // Round Robin has no Knockouts pre-round or Semifinal-vs-Playoffs
-      // choice — it's always a fixed top-4 Semifinal + Bronze bracket, so
-      // lock the bracket format in as soon as "yes" is chosen.
-      if (choice === 'yes' && week?.format === 'round_robin') patch.bracket_format = 'semifinal';
+      // choice — it's always a fixed top-4 Playoffs bracket (Qualifier 1,
+      // Eliminator, Qualifier 2, Grand Final), so lock the bracket format
+      // in as soon as "yes" is chosen.
+      if (choice === 'yes' && week?.format === 'round_robin') patch.bracket_format = 'playoffs';
       const { error: err } = await supabase.from('weeks').update(patch).eq('id', weekId);
       if (err) throw err;
       await loadWeeks(false);
@@ -2744,6 +2745,37 @@ export default function App() {
           </span>
         </div>
         {editor}
+      </div>
+    );
+  }
+
+  // Full score-entry card for one bracket-stage match (Semifinal/Playoffs/
+  // Grand Final/Bronze) — used inline in Tournament Progress as soon as the
+  // match exists, so scoring it never requires scrolling down to Full Match
+  // Schedule (which only shows league-stage matches).
+  function renderBracketMatchCard(match) {
+    return (
+      <div className="card" key={match.id}>
+        <div className="row">
+          <h3>
+            {match.label ? `${match.label} · ` : `Slot ${match.slot} · Court ${match.court} · `}
+            {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
+          </h3>
+          <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
+            Reset Match Scores
+          </button>
+        </div>
+
+        <div className="teamVsBlock">
+          <TeamLabel teamId={match.team1_id} />
+          <div className="scoreBig">VS</div>
+          <TeamLabel teamId={match.team2_id} />
+        </div>
+
+        {games
+          .filter((game) => game.match_id === match.id)
+          .sort((a, b) => a.game_number - b.game_number)
+          .map((game) => renderGameScoreEditor(game))}
       </div>
     );
   }
@@ -3309,18 +3341,11 @@ export default function App() {
     return teams.filter((t) => ids.has(t.id));
   }, [semifinalMatches, teams]);
 
-  // Round Robin never creates a preliminary "knockout" stage match (see
-  // top4KnockoutWinners above), so knockoutEntrantTeams always stays empty
-  // for it — the "Q" badge instead marks the top 4 that reached Semifinals.
-  const qualifiedTeamIds = useMemo(() => {
-    const source = week?.format === 'round_robin' ? semifinalEntrantTeams : knockoutEntrantTeams;
-    return new Set(source.map((t) => t.id));
-  }, [week?.format, semifinalEntrantTeams, knockoutEntrantTeams]);
-
-  // Override dropdown pool for the Semifinal seeding — Inter-Club League
-  // restricts overrides to teams that played the Knockouts pre-round, Round
-  // Robin (no pre-round) restricts to the fixed top-4 from League Standings.
-  const semifinalOverridePool = week?.format === 'round_robin' ? top4KnockoutWinners : knockoutEntrantTeams;
+  // Override dropdown pool for the Semifinal/Playoffs first-round seeding —
+  // Inter-Club League restricts overrides to teams that played the
+  // Knockouts pre-round, Round Robin (no pre-round) restricts to the fixed
+  // top-4 from League Standings.
+  const bracketOverridePool = week?.format === 'round_robin' ? top4KnockoutWinners : knockoutEntrantTeams;
 
   // --- Playoffs path ---
   const playoffsDefaultQ1E = useMemo(() => {
@@ -3416,6 +3441,17 @@ export default function App() {
     () => (qualifier2Result?.loserTeamId ? teams.find((t) => t.id === qualifier2Result.loserTeamId) : null),
     [qualifier2Result, teams]
   );
+
+  // Round Robin never creates a preliminary "knockout" stage match (see
+  // top4KnockoutWinners above), so knockoutEntrantTeams always stays empty
+  // for it — the "Q" badge instead marks the top 4 that reached the
+  // Playoffs first round (or, defensively, an older Semifinal-format week).
+  const qualifiedTeamIds = useMemo(() => {
+    const source = week?.format === 'round_robin'
+      ? [...semifinalEntrantTeams, ...playoffsQ1EliminatorEntrantTeams]
+      : knockoutEntrantTeams;
+    return new Set(source.map((t) => t.id));
+  }, [week?.format, semifinalEntrantTeams, playoffsQ1EliminatorEntrantTeams, knockoutEntrantTeams]);
 
   const medalWinners = useMemo(() => {
     if (!grandFinalMatch || !matchIsComplete(grandFinalMatch, games, scores)) return null;
@@ -3543,11 +3579,11 @@ export default function App() {
           ))}
         </div>
 
-        <div className="card">
+        <div className="card liveSyncPanel">
           <b>{saving ? 'SAVING' : 'LIVE SYNC'}</b>
           <p className="buildMarker">Build: V19.0 Inter-Club League</p>
           <p className="muted">Score typing is local until Save is clicked.</p>
-          <button className="btn secondary" onClick={undo}><RotateCcw size={16} /> Undo Last Score</button>
+          <button className="btn secondary" onClick={undo}><RotateCcw size={16} /> Undo<span className="undoLabelRest"> Last Score</span></button>
         </div>
       </aside>
 
@@ -4087,7 +4123,7 @@ export default function App() {
                     <h4>Run Knockouts?</h4>
                     <p className="muted">
                       {week?.format === 'round_robin'
-                        ? 'Play a Semifinal + Bronze Medal Match + Grand Final between the top 4 teams to crown a weekly champion?'
+                        ? 'Play a Playoffs bracket (Qualifier, Eliminator, Qualifier 2, Grand Final) between the top 4 teams to crown a weekly champion?'
                         : ''}
                     </p>
                     <div className="row">
@@ -4153,6 +4189,9 @@ export default function App() {
 
                 {knockoutMatches.length > 0 && (
                   <div className="card">
+                    <h4>Knockouts</h4>
+                    {knockoutMatches.map((m) => renderBracketMatchCard(m))}
+
                     <h4>Knockout Standings</h4>
                     <p className="muted">Winners of each knockout matchup, in seed order — everything below is based on this ranking, not the league standings.</p>
                     <table>
@@ -4211,7 +4250,7 @@ export default function App() {
                               onChange={(e) => setSemifinalOverride(p.bracketOrder, 'team1Id', e.target.value)}
                             >
                               <option value="">Select Team</option>
-                              {semifinalOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                              {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                             </select>
                             <span>vs</span>
                             <select
@@ -4219,7 +4258,7 @@ export default function App() {
                               onChange={(e) => setSemifinalOverride(p.bracketOrder, 'team2Id', e.target.value)}
                             >
                               <option value="">Select Team</option>
-                              {semifinalOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                              {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                             </select>
                           </div>
                         ))}
@@ -4227,64 +4266,70 @@ export default function App() {
                           Confirm Semifinal Matches
                         </button>
                       </>
-                    ) : !semifinalComplete ? (
-                      <>
-                        <p className="muted">Finish entering both semifinal scores to continue.</p>
-                        <button className="btn danger" onClick={() => redoStage('semifinal')}>Redo Semifinals</button>
-                      </>
                     ) : (
                       <>
-                        {!grandFinalMatch && (
-                          <div className="card">
-                            <h4>Grand Final</h4>
-                            <p className="muted">Override pool: every team that played in the Semifinals.</p>
-                            <div className="row" style={{ alignItems: 'center' }}>
-                              <select
-                                value={grandFinalPair.team1?.id || ''}
-                                onChange={(e) => setGrandFinalOverrideSide('team1Id', e.target.value)}
-                              >
-                                <option value="">Select Team</option>
-                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
-                              </select>
-                              <span>vs</span>
-                              <select
-                                value={grandFinalPair.team2?.id || ''}
-                                onChange={(e) => setGrandFinalOverrideSide('team2Id', e.target.value)}
-                              >
-                                <option value="">Select Team</option>
-                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
-                              </select>
-                            </div>
-                            <button className="btn green" onClick={confirmGrandFinalMatch}>Confirm Grand Final</button>
-                          </div>
-                        )}
+                        {semifinalMatches.map((m) => renderBracketMatchCard(m))}
 
-                        {!bronzeMatch && (
-                          <div className="card">
-                            <h4>Bronze Medal Match</h4>
-                            <p className="muted">Losers of the Semifinals. Override pool: every team that played in the Semifinals.</p>
-                            <div className="row" style={{ alignItems: 'center' }}>
-                              <select
-                                value={bronzePair.team1?.id || ''}
-                                onChange={(e) => setBronzeOverrideSide('team1Id', e.target.value)}
-                              >
-                                <option value="">Select Team</option>
-                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
-                              </select>
-                              <span>vs</span>
-                              <select
-                                value={bronzePair.team2?.id || ''}
-                                onChange={(e) => setBronzeOverrideSide('team2Id', e.target.value)}
-                              >
-                                <option value="">Select Team</option>
-                                {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
-                              </select>
-                            </div>
-                            <button className="btn green" onClick={confirmBronzeMatch}>Confirm Bronze Medal Match</button>
-                          </div>
-                        )}
+                        {!semifinalComplete ? (
+                          <button className="btn danger" onClick={() => redoStage('semifinal')}>Redo Semifinals</button>
+                        ) : (
+                          <>
+                            {!grandFinalMatch && (
+                              <div className="card">
+                                <h4>Grand Final</h4>
+                                <p className="muted">Override pool: every team that played in the Semifinals.</p>
+                                <div className="row" style={{ alignItems: 'center' }}>
+                                  <select
+                                    value={grandFinalPair.team1?.id || ''}
+                                    onChange={(e) => setGrandFinalOverrideSide('team1Id', e.target.value)}
+                                  >
+                                    <option value="">Select Team</option>
+                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                  </select>
+                                  <span>vs</span>
+                                  <select
+                                    value={grandFinalPair.team2?.id || ''}
+                                    onChange={(e) => setGrandFinalOverrideSide('team2Id', e.target.value)}
+                                  >
+                                    <option value="">Select Team</option>
+                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                  </select>
+                                </div>
+                                <button className="btn green" onClick={confirmGrandFinalMatch}>Confirm Grand Final</button>
+                              </div>
+                            )}
 
-                        <button className="btn danger" onClick={() => redoStage('semifinal')}>Redo Semifinals</button>
+                            {!bronzeMatch && (
+                              <div className="card">
+                                <h4>Bronze Medal Match</h4>
+                                <p className="muted">Losers of the Semifinals. Override pool: every team that played in the Semifinals.</p>
+                                <div className="row" style={{ alignItems: 'center' }}>
+                                  <select
+                                    value={bronzePair.team1?.id || ''}
+                                    onChange={(e) => setBronzeOverrideSide('team1Id', e.target.value)}
+                                  >
+                                    <option value="">Select Team</option>
+                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                  </select>
+                                  <span>vs</span>
+                                  <select
+                                    value={bronzePair.team2?.id || ''}
+                                    onChange={(e) => setBronzeOverrideSide('team2Id', e.target.value)}
+                                  >
+                                    <option value="">Select Team</option>
+                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                  </select>
+                                </div>
+                                <button className="btn green" onClick={confirmBronzeMatch}>Confirm Bronze Medal Match</button>
+                              </div>
+                            )}
+
+                            {grandFinalMatch && renderBracketMatchCard(grandFinalMatch)}
+                            {bronzeMatch && renderBracketMatchCard(bronzeMatch)}
+
+                            <button className="btn danger" onClick={() => redoStage('semifinal')}>Redo Semifinals</button>
+                          </>
+                        )}
                       </>
                     )}
                   </div>
@@ -4293,7 +4338,9 @@ export default function App() {
                 {week?.bracket_format === 'playoffs' && (
                   <div className="card">
                     <h4>Playoffs</h4>
-                    <p className="muted">Qualifier 1: Rank 1 vs Rank 2. Eliminator: Rank 3 vs Rank 4 (from Knockout Standings).</p>
+                    <p className="muted">
+                      Qualifier 1: Rank 1 vs Rank 2. Eliminator: Rank 3 vs Rank 4 (from {week?.format === 'round_robin' ? 'League Standings' : 'Knockout Standings'}).
+                    </p>
 
                     {!playoffsQ1EliminatorResults.length ? (
                       <>
@@ -4304,7 +4351,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(1, 'team1Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                           <span>vs</span>
                           <select
@@ -4312,7 +4359,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(1, 'team2Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                         </div>
                         <div className="row" style={{ alignItems: 'center' }}>
@@ -4322,7 +4369,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(2, 'team1Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                           <span>vs</span>
                           <select
@@ -4330,7 +4377,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(2, 'team2Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {knockoutEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                         </div>
                         <button
@@ -4341,71 +4388,80 @@ export default function App() {
                           Confirm Qualifier 1 &amp; Eliminator
                         </button>
                       </>
-                    ) : !playoffsQ1EliminatorComplete ? (
-                      <>
-                        <p className="muted">Finish entering the Qualifier 1 and Eliminator scores to continue.</p>
-                        <button className="btn danger" onClick={() => redoStage('playoffs')}>Redo Playoffs</button>
-                      </>
-                    ) : !qualifier2Match ? (
-                      <div className="card">
-                        <h4>Qualifier 2</h4>
-                        <p className="muted">Loser of Qualifier 1 vs winner of Eliminator. Override pool: teams that played Qualifier 1 or Eliminator.</p>
-                        <div className="row" style={{ alignItems: 'center' }}>
-                          <select
-                            value={qualifier2Pair?.team1?.id || ''}
-                            onChange={(e) => setPlayoffsOverride(3, 'team1Id', e.target.value)}
-                          >
-                            <option value="">Select Team</option>
-                            {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
-                          </select>
-                          <span>vs</span>
-                          <select
-                            value={qualifier2Pair?.team2?.id || ''}
-                            onChange={(e) => setPlayoffsOverride(3, 'team2Id', e.target.value)}
-                          >
-                            <option value="">Select Team</option>
-                            {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
-                          </select>
-                        </div>
-                        <button className="btn green" onClick={confirmQualifier2Match} disabled={!qualifier2Pair}>
-                          Confirm Qualifier 2
-                        </button>
-                      </div>
-                    ) : !qualifier2Complete ? (
-                      <p className="muted">Finish entering the Qualifier 2 score to continue.</p>
                     ) : (
                       <>
-                        {!grandFinalMatch && (
-                          <div className="card">
-                            <h4>Grand Final</h4>
-                            <p className="muted">Winner of Qualifier 1 vs winner of Qualifier 2. Override pool: teams that played Qualifier 1, Eliminator, or Qualifier 2.</p>
-                            <div className="row" style={{ alignItems: 'center' }}>
-                              <select
-                                value={playoffsGrandFinalPair?.team1?.id || ''}
-                                onChange={(e) => setGrandFinalOverrideSide('team1Id', e.target.value)}
-                              >
-                                <option value="">Select Team</option>
-                                {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
-                              </select>
-                              <span>vs</span>
-                              <select
-                                value={playoffsGrandFinalPair?.team2?.id || ''}
-                                onChange={(e) => setGrandFinalOverrideSide('team2Id', e.target.value)}
-                              >
-                                <option value="">Select Team</option>
-                                {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
-                              </select>
-                            </div>
-                            <button className="btn green" onClick={confirmGrandFinalMatch} disabled={!playoffsGrandFinalPair}>
-                              Confirm Grand Final
-                            </button>
-                          </div>
-                        )}
+                        {playoffsQ1EliminatorResults.map((r) => renderBracketMatchCard(r.match))}
 
-                        {playoffsBronzeLoserTeam && (
-                          <p className="muted">
-                            Bronze medalist (loser of Qualifier 2): <b>{playoffsBronzeLoserTeam.emoji} {playoffsBronzeLoserTeam.name}</b>
-                          </p>
+                        {playoffsQ1EliminatorComplete && (
+                          !qualifier2Match ? (
+                            <div className="card">
+                              <h4>Qualifier 2</h4>
+                              <p className="muted">Loser of Qualifier 1 vs winner of Eliminator. Override pool: teams that played Qualifier 1 or Eliminator.</p>
+                              <div className="row" style={{ alignItems: 'center' }}>
+                                <select
+                                  value={qualifier2Pair?.team1?.id || ''}
+                                  onChange={(e) => setPlayoffsOverride(3, 'team1Id', e.target.value)}
+                                >
+                                  <option value="">Select Team</option>
+                                  {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                </select>
+                                <span>vs</span>
+                                <select
+                                  value={qualifier2Pair?.team2?.id || ''}
+                                  onChange={(e) => setPlayoffsOverride(3, 'team2Id', e.target.value)}
+                                >
+                                  <option value="">Select Team</option>
+                                  {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                </select>
+                              </div>
+                              <button className="btn green" onClick={confirmQualifier2Match} disabled={!qualifier2Pair}>
+                                Confirm Qualifier 2
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              {renderBracketMatchCard(qualifier2Match)}
+
+                              {qualifier2Complete && (
+                                <>
+                                  {!grandFinalMatch && (
+                                    <div className="card">
+                                      <h4>Grand Final</h4>
+                                      <p className="muted">Winner of Qualifier 1 vs winner of Qualifier 2. Override pool: teams that played Qualifier 1, Eliminator, or Qualifier 2.</p>
+                                      <div className="row" style={{ alignItems: 'center' }}>
+                                        <select
+                                          value={playoffsGrandFinalPair?.team1?.id || ''}
+                                          onChange={(e) => setGrandFinalOverrideSide('team1Id', e.target.value)}
+                                        >
+                                          <option value="">Select Team</option>
+                                          {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                        </select>
+                                        <span>vs</span>
+                                        <select
+                                          value={playoffsGrandFinalPair?.team2?.id || ''}
+                                          onChange={(e) => setGrandFinalOverrideSide('team2Id', e.target.value)}
+                                        >
+                                          <option value="">Select Team</option>
+                                          {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                        </select>
+                                      </div>
+                                      <button className="btn green" onClick={confirmGrandFinalMatch} disabled={!playoffsGrandFinalPair}>
+                                        Confirm Grand Final
+                                      </button>
+                                    </div>
+                                  )}
+
+                                  {playoffsBronzeLoserTeam && (
+                                    <p className="muted">
+                                      Bronze medalist (loser of Qualifier 2): <b>{playoffsBronzeLoserTeam.emoji} {playoffsBronzeLoserTeam.name}</b>
+                                    </p>
+                                  )}
+
+                                  {grandFinalMatch && renderBracketMatchCard(grandFinalMatch)}
+                                </>
+                              )}
+                            </>
+                          )
                         )}
 
                         <button className="btn danger" onClick={() => redoStage('playoffs')}>Redo Playoffs</button>
@@ -4583,133 +4639,48 @@ export default function App() {
             <div className="sectionDivider" />
 
             <h2>Full Match Schedule</h2>
-            <p className="muted">The original individual-game score entry remains available below.</p>
+            <p className="muted">
+              The original individual-game score entry remains available below. Bracket-stage matches
+              (Knockouts/Semifinals/Playoffs/Grand Final/Bronze) are scored up in Tournament Progress, not here.
+            </p>
 
-            {week?.format === 'inter_club_league' ? (
-              Object.entries(
-                matches.reduce((acc, m) => {
-                  const stage = m.stage || 'league';
-                  if (!acc[stage]) acc[stage] = [];
-                  acc[stage].push(m);
-                  return acc;
-                }, {})
-              )
-                .sort(([a], [b]) => STAGE_ORDER.indexOf(b) - STAGE_ORDER.indexOf(a))
-                .map(([stage, stageMatches]) => (
-                  <div key={stage} className="setGroup">
-                    <h3>{STAGE_LABELS[stage] || stage}</h3>
-                    {stageMatches
-                      .sort((a, b) => (a.bracket_order ?? a.slot ?? 0) - (b.bracket_order ?? b.slot ?? 0))
-                      .map((match) => (
-                        <div className="card" key={match.id}>
-                          <div className="row">
-                            <h3>
-                              {match.label ? `${match.label} · ` : `Slot ${match.slot} · Court ${match.court} · `}
-                              {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
-                            </h3>
-                            <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
-                              Reset Match Scores
-                            </button>
-                          </div>
+            {Object.entries(
+              matches.filter((m) => (m.stage || 'league') === 'league').reduce((acc, m) => {
+                const setNumber = m.set_number || 1;
+                if (!acc[setNumber]) acc[setNumber] = [];
+                acc[setNumber].push(m);
+                return acc;
+              }, {})
+            )
+              .sort(([a], [b]) => Number(a) - Number(b))
+              .map(([setNumber, setMatches]) => (
+                <div key={`set-${setNumber}`} className="setGroup">
+                  <h3>Set {setNumber}</h3>
+                  {setMatches.map((match) => (
+                    <div className="card" key={match.id}>
+                      <div className="row">
+                        <h3>
+                          Slot {match.slot} · Court {match.court} · {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
+                        </h3>
+                        <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
+                          Reset Match Scores
+                        </button>
+                      </div>
 
-                          <div className="teamVsBlock">
-                            <TeamLabel teamId={match.team1_id} />
-                            <div className="scoreBig">VS</div>
-                            <TeamLabel teamId={match.team2_id} />
-                          </div>
+                      <div className="teamVsBlock">
+                        <TeamLabel teamId={match.team1_id} />
+                        <div className="scoreBig">VS</div>
+                        <TeamLabel teamId={match.team2_id} />
+                      </div>
 
-                          {games
-                            .filter((game) => game.match_id === match.id)
-                            .sort((a, b) => a.game_number - b.game_number)
-                            .map((game) => renderGameScoreEditor(game))}
-                        </div>
-                      ))}
-                  </div>
-                ))
-            ) : (
-              <>
-                {Object.entries(
-                  matches.filter((m) => (m.stage || 'league') === 'league').reduce((acc, m) => {
-                    const setNumber = m.set_number || 1;
-                    if (!acc[setNumber]) acc[setNumber] = [];
-                    acc[setNumber].push(m);
-                    return acc;
-                  }, {})
-                )
-                  .sort(([a], [b]) => Number(a) - Number(b))
-                  .map(([setNumber, setMatches]) => (
-                    <div key={`set-${setNumber}`} className="setGroup">
-                      <h3>Set {setNumber}</h3>
-                      {setMatches.map((match) => (
-                        <div className="card" key={match.id}>
-                          <div className="row">
-                            <h3>
-                              Slot {match.slot} · Court {match.court} · {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
-                            </h3>
-                            <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
-                              Reset Match Scores
-                            </button>
-                          </div>
-
-                          <div className="teamVsBlock">
-                            <TeamLabel teamId={match.team1_id} />
-                            <div className="scoreBig">VS</div>
-                            <TeamLabel teamId={match.team2_id} />
-                          </div>
-
-                          {games
-                            .filter((game) => game.match_id === match.id)
-                            .sort((a, b) => a.game_number - b.game_number)
-                            .map((game) => renderGameScoreEditor(game))}
-                        </div>
-                      ))}
+                      {games
+                        .filter((game) => game.match_id === match.id)
+                        .sort((a, b) => a.game_number - b.game_number)
+                        .map((game) => renderGameScoreEditor(game))}
                     </div>
                   ))}
-
-                {/* Weekly knockout bracket matches (Round Robin) — grouped by
-                    stage like Inter-Club League's bracket, not by set. */}
-                {Object.entries(
-                  matches.filter((m) => (m.stage || 'league') !== 'league').reduce((acc, m) => {
-                    const stage = m.stage || 'league';
-                    if (!acc[stage]) acc[stage] = [];
-                    acc[stage].push(m);
-                    return acc;
-                  }, {})
-                )
-                  .sort(([a], [b]) => STAGE_ORDER.indexOf(b) - STAGE_ORDER.indexOf(a))
-                  .map(([stage, stageMatches]) => (
-                    <div key={stage} className="setGroup">
-                      <h3>{STAGE_LABELS[stage] || stage}</h3>
-                      {stageMatches
-                        .sort((a, b) => (a.bracket_order ?? a.slot ?? 0) - (b.bracket_order ?? b.slot ?? 0))
-                        .map((match) => (
-                          <div className="card" key={match.id}>
-                            <div className="row">
-                              <h3>
-                                {match.label ? `${match.label} · ` : `Slot ${match.slot} · Court ${match.court} · `}
-                                {team(match.team1_id)?.name} vs {team(match.team2_id)?.name}
-                              </h3>
-                              <button className="btn danger" onClick={() => resetMatchScores(match.id)}>
-                                Reset Match Scores
-                              </button>
-                            </div>
-
-                            <div className="teamVsBlock">
-                              <TeamLabel teamId={match.team1_id} />
-                              <div className="scoreBig">VS</div>
-                              <TeamLabel teamId={match.team2_id} />
-                            </div>
-
-                            {games
-                              .filter((game) => game.match_id === match.id)
-                              .sort((a, b) => a.game_number - b.game_number)
-                              .map((game) => renderGameScoreEditor(game))}
-                          </div>
-                        ))}
-                    </div>
-                  ))}
-              </>
-            )}
+                </div>
+              ))}
           </div>
         )}
 
@@ -5275,6 +5246,7 @@ function Standings({ rows, type, onSelectPlayer, awayLabel, title, qualifiedTeam
     <div className="card">
       <h2>{title || 'Standings'}</h2>
       <div className="fireline" />
+      <p className="swipeHint">Swipe for more →</p>
 
       {type === 'team' ? (
         <table>
@@ -5361,6 +5333,7 @@ function RankingsStandings({ rows, onRefresh, onSelectPlayer }) {
         more than older results.
         <button className="btn secondary" onClick={onRefresh} style={{ marginLeft: 8 }}>Refresh</button>
       </p>
+      <p className="swipeHint">Swipe for more →</p>
 
       <table>
         <thead>
