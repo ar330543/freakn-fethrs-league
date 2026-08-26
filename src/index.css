@@ -135,6 +135,7 @@ textarea { min-height: 120px; }
 .btn:disabled { opacity: 0.4; cursor: default; }
 
 table { width: 100%; border-collapse: collapse; }
+.swipeHint { display: none; }
 th, td { padding: 11px 9px; border-bottom: 1px solid #242424; text-align: left; }
 th { color: #999; font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
 
@@ -496,6 +497,41 @@ body {
     font-size: 12px;
   }
 
+  /* Collapse the Live Sync status card to a single slim row on mobile —
+     it used to stack 4 lines (label, build marker, helper text, full-width
+     button) above every tab's actual content, pushing everything else down
+     by 150px+ before you could start reading. */
+  .liveSyncPanel {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .liveSyncPanel b {
+    font-size: 11px;
+    white-space: nowrap;
+  }
+
+  .liveSyncPanel .buildMarker,
+  .liveSyncPanel > p.muted {
+    display: none;
+  }
+
+  .liveSyncPanel .btn {
+    width: auto;
+    padding: 8px 10px;
+    font-size: 11px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .liveSyncPanel .undoLabelRest {
+    display: none;
+  }
+
   .main {
     max-width: none;
     width: 100%;
@@ -678,6 +714,17 @@ body {
     overflow-x: auto;
     white-space: nowrap;
     -webkit-overflow-scrolling: touch;
+  }
+
+  /* Wide tables (Standings, Rankings) just clip at the card edge with no
+     hint that there are more columns off-screen — this makes the
+     already-present horizontal scroll discoverable. */
+  .swipeHint {
+    display: block;
+    margin: -4px 0 10px;
+    font-size: 11px;
+    color: var(--muted);
+    text-align: right;
   }
 
   th,
