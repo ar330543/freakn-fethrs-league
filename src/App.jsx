@@ -43,16 +43,43 @@ const STAGE_LABELS = {
   bronze: 'Bronze Medal Match',
 };
 
+// Auto-generated team identities: [name, emoji, color]. Each new team is
+// assigned the next one in rotation (buildBalancedTeamDefs / etc. below),
+// so within a set of teams every mascot+color pairing is distinct; across
+// sets they repeat, which reads as "randomly assigned" without a team's
+// badge ever changing on reload — same team, same look, every time.
 const teamColors = [
-  ['Red', '🔴', '#ef4444'],
-  ['Blue', '🔵', '#38bdf8'],
-  ['Green', '🟢', '#22c55e'],
-  ['Yellow', '🟡', '#facc15'],
-  ['Orange', '🟠', '#fb923c'],
-  ['Purple', '🟣', '#a78bfa'],
-  ['Black', '⚫', '#9ca3af'],
-  ['White', '⚪', '#e5e7eb'],
+  ['Falcons', '🦅', '#ef4444'],
+  ['Blaze', '🔥', '#f97316'],
+  ['Bolts', '⚡', '#eab308'],
+  ['Vipers', '🐍', '#84cc16'],
+  ['Sharks', '🦈', '#22c55e'],
+  ['Storm', '🌪️', '#14b8a6'],
+  ['Waves', '🌊', '#38bdf8'],
+  ['Nova', '✨', '#6366f1'],
+  ['Vortex', '🌀', '#a78bfa'],
+  ['Scorpions', '🦂', '#d946ef'],
+  ['Titans', '🦁', '#ec4899'],
+  ['Wolves', '🐺', '#71717a'],
 ];
+
+// A team's "profile pic": its assigned emoji on a gradient disc tinted from
+// its assigned color. Reused everywhere a team's identity shows (team
+// cards, podium, standings, live match cards) so the same team always
+// reads as the same badge.
+function TeamBadge({ team, size = 'md' }) {
+  if (!team) return null;
+  return (
+    <span
+      className={`teamBadge teamBadge-${size}`}
+      style={{ '--badge-color': team.color }}
+      role="img"
+      aria-label={team.name}
+    >
+      {team.emoji}
+    </span>
+  );
+}
 
 function pairs(players) {
   const out = [];
@@ -930,6 +957,15 @@ function buildSkillBalancedTeams(teamPlayers, count, forbiddenPairs, rankScoreBy
 
 
 export default function App() {
+  // In-app replacement for window.confirm(): async, styled, and lets a
+  // "danger" flag (irreversible delete) look and read differently from a
+  // routine reset — so the two stop training people to click through the
+  // same dialog on reflex. askConfirm() resolves when the dialog closes.
+  const [confirmState, setConfirmState] = useState(null); // { message, danger, resolve }
+  function askConfirm(message, { danger = true } = {}) {
+    return new Promise((resolve) => setConfirmState({ message, danger, resolve }));
+  }
+
   const [tab, setTab] = useState('dashboard');
   const [adminUnlocked, setAdminUnlocked] = useState(isAdminUnlocked());
   const [mode, setMode] = useState('auto');
@@ -1332,7 +1368,7 @@ export default function App() {
     return (
       <div>
         <div className="pill" style={{ background: `${t.color}33`, color: t.color }}>
-          {t.emoji} {t.name}
+          <TeamBadge team={t} size="sm" /> {t.name}
         </div>
         <div className="teamMembers">
           {members.length
@@ -1374,7 +1410,7 @@ export default function App() {
   }
 
   async function removePlayer(player) {
-    if (!confirm(`Remove ${player.name}? This may remove related team/game rows.`)) return;
+    if (!(await askConfirm(`Remove ${player.name}? This may remove related team/game rows.`))) return;
     await act(async () => {
       const { error: err } = await supabase.from('players').delete().eq('id', player.id);
       if (err) throw err;
@@ -1395,7 +1431,7 @@ export default function App() {
   }
 
   async function removeClub(club) {
-    if (!confirm(`Remove ${club.name}? This removes its players, teams, and matches for this week.`)) return;
+    if (!(await askConfirm(`Remove ${club.name}? This removes its players, teams, and matches for this week.`))) return;
     await act(async () => {
       const { error: err } = await supabase.from('clubs').delete().eq('id', club.id);
       if (err) throw err;
@@ -1431,7 +1467,7 @@ export default function App() {
   }
 
   async function removeRegularPlayer(regular) {
-    if (!confirm(`Remove ${regular.name} from the roster? This does not affect any week's player list.`)) return;
+    if (!(await askConfirm(`Remove ${regular.name} from the roster? This does not affect any week's player list.`))) return;
     await act(async () => {
       const { error: err } = await supabase.from('regular_players').delete().eq('id', regular.id);
       if (err) throw err;
@@ -1584,7 +1620,7 @@ export default function App() {
     if (!ensureAdmin()) return;
 
     const nextWeek = weeks.find((w) => w.id !== weekId);
-    if (!confirm(`Delete ${week?.name || 'this week'}? This deletes only that week.`)) return;
+    if (!(await askConfirm(`Delete ${week?.name || 'this week'}? This deletes only that week.`))) return;
 
     await act(async () => {
       const { data: matchRows } = await supabase.from('matches').select('id').eq('week_id', weekId);
@@ -1606,7 +1642,7 @@ export default function App() {
     if (!ensureAdmin()) return;
 
     const nextLeague = leagues.find((l) => l.id !== leagueId);
-    if (!confirm('Delete entire league? This removes all weeks in this league only.')) return;
+    if (!(await askConfirm('Delete entire league? This removes all weeks in this league only.'))) return;
 
     await act(async () => {
       const leagueWeeks = await fetchLeagueWeeks();
@@ -1630,7 +1666,7 @@ export default function App() {
 
   async function deleteSet(setNumber) {
     if (!weekId) return fail('No week is selected.');
-    if (!confirm(`Delete Set ${setNumber}? This deletes its teams, matches, and scores. Other sets in this week are not affected.`)) return;
+    if (!(await askConfirm(`Delete Set ${setNumber}? This deletes its teams, matches, and scores. Other sets in this week are not affected.`))) return;
     await act(async () => {
       await deleteSetRows(weekId, setNumber);
     });
@@ -2437,7 +2473,7 @@ export default function App() {
 
   async function redoStage(stage) {
     if (!weekId) return fail('No week is selected.');
-    if (!confirm(`Redo the ${STAGE_LABELS[stage] || stage} stage? This deletes its matches and scores.`)) return;
+    if (!(await askConfirm(`Redo the ${STAGE_LABELS[stage] || stage} stage? This deletes its matches and scores.`))) return;
 
     await act(async () => {
       await deleteStageMatches(weekId, stage);
@@ -2652,7 +2688,7 @@ export default function App() {
   }
 
   async function resetMatchScores(matchId) {
-    if (!confirm('Reset scores for this match?')) return;
+    if (!(await askConfirm('Reset scores for this match?', { danger: false }))) return;
     const matchGames = games.filter((g) => g.match_id === matchId);
 
     await act(async () => {
@@ -2975,7 +3011,7 @@ export default function App() {
 
   async function clearOverallLeaderboard() {
     if (!leagueId) return fail('No league is selected.');
-    if (!confirm('Clear the overall leaderboard for this league?')) return;
+    if (!(await askConfirm('Clear the overall leaderboard for this league? (Saved to history first.)', { danger: false }))) return;
 
     await act(async () => {
       if ((overallRows || []).length) {
@@ -3091,7 +3127,7 @@ export default function App() {
 
   async function clearWeekCost() {
     if (!weekId) return fail('No week is selected.');
-    if (!confirm('Clear cost details for this week?')) return;
+    if (!(await askConfirm('Clear cost details for this week?', { danger: false }))) return;
 
     await act(async () => {
       const { error: err } = await supabase.from('week_costs').delete().eq('week_id', weekId);
@@ -3886,7 +3922,7 @@ export default function App() {
                           <h3>{c.name} Teams</h3>
                           {clubTeams.map((t) => (
                             <div className="card" key={t.id} style={{ borderLeft: `5px solid ${t.color}` }}>
-                              <h3>{t.emoji} {t.name}</h3>
+                              <h3><TeamBadge team={t} size="sm" /> {t.name}</h3>
                               <p>
                                 {playersForTeam(t.id).map((p, i) => (
                                   <span key={p.id}>{i > 0 && ', '}<PlayerName name={p.name} onSelect={openPlayerDashboard} /></span>
@@ -4065,7 +4101,7 @@ export default function App() {
                       </div>
                       {setTeams.map((t) => (
                         <div className="card" key={t.id} style={{ borderLeft: `5px solid ${t.color}` }}>
-                          <h3>{t.emoji} {t.name}</h3>
+                          <h3><TeamBadge team={t} size="sm" /> {t.name}</h3>
                           <p>
                             {playersForTeam(t.id).map((p, i) => (
                               <span key={p.id}>{i > 0 && ', '}<PlayerName name={p.name} onSelect={openPlayerDashboard} /></span>
@@ -4203,7 +4239,7 @@ export default function App() {
                             <td>
                       {r.winner ? (
                         <>
-                          <div>{r.winner.emoji} {r.winner.name}</div>
+                          <div><TeamBadge team={r.winner} size="sm" /> {r.winner.name}</div>
                           <div className="teamMembers">{teamMembersText(r.winner.id)}</div>
                         </>
                       ) : 'Not yet decided'}
@@ -4477,20 +4513,20 @@ export default function App() {
                       <div className="medalCard medalSilver">
                         <div className="medalEmoji">🥈</div>
                         <div className="medalPlace">Runner-Up</div>
-                        <div className="medalTeamName">{medalWinners.silver.emoji} {medalWinners.silver.name}</div>
+                        <div className="medalTeamName"><TeamBadge team={medalWinners.silver} size="sm" /> {medalWinners.silver.name}</div>
                         <div className="medalTeamMembers">{teamMembersText(medalWinners.silver.id)}</div>
                       </div>
                       <div className="medalCard medalGold">
                         <div className="medalEmoji">🥇</div>
                         <div className="medalPlace">Champion</div>
-                        <div className="medalTeamName">{medalWinners.gold.emoji} {medalWinners.gold.name}</div>
+                        <div className="medalTeamName"><TeamBadge team={medalWinners.gold} size="md" /> {medalWinners.gold.name}</div>
                         <div className="medalTeamMembers">{teamMembersText(medalWinners.gold.id)}</div>
                       </div>
                       {medalWinners.bronze && (
                         <div className="medalCard medalBronze">
                           <div className="medalEmoji">🥉</div>
                           <div className="medalPlace">Bronze</div>
-                          <div className="medalTeamName">{medalWinners.bronze.emoji} {medalWinners.bronze.name}</div>
+                          <div className="medalTeamName"><TeamBadge team={medalWinners.bronze} size="sm" /> {medalWinners.bronze.name}</div>
                           <div className="medalTeamMembers">{teamMembersText(medalWinners.bronze.id)}</div>
                         </div>
                       )}
@@ -4749,20 +4785,20 @@ export default function App() {
                   <div className="medalCard medalSilver">
                     <div className="medalEmoji">🥈</div>
                     <div className="medalPlace">Runner-Up</div>
-                    <div className="medalTeamName">{medalWinners.silver.emoji} {medalWinners.silver.name}</div>
+                    <div className="medalTeamName"><TeamBadge team={medalWinners.silver} size="sm" /> {medalWinners.silver.name}</div>
                     <div className="medalTeamMembers">{teamMembersText(medalWinners.silver.id)}</div>
                   </div>
                   <div className="medalCard medalGold">
                     <div className="medalEmoji">🥇</div>
                     <div className="medalPlace">Champion</div>
-                    <div className="medalTeamName">{medalWinners.gold.emoji} {medalWinners.gold.name}</div>
+                    <div className="medalTeamName"><TeamBadge team={medalWinners.gold} size="md" /> {medalWinners.gold.name}</div>
                     <div className="medalTeamMembers">{teamMembersText(medalWinners.gold.id)}</div>
                   </div>
                   {medalWinners.bronze && (
                     <div className="medalCard medalBronze">
                       <div className="medalEmoji">🥉</div>
                       <div className="medalPlace">Bronze</div>
-                      <div className="medalTeamName">{medalWinners.bronze.emoji} {medalWinners.bronze.name}</div>
+                      <div className="medalTeamName"><TeamBadge team={medalWinners.bronze} size="sm" /> {medalWinners.bronze.name}</div>
                       <div className="medalTeamMembers">{teamMembersText(medalWinners.bronze.id)}</div>
                     </div>
                   )}
@@ -4792,7 +4828,7 @@ export default function App() {
                     <td>
                       {r.winner ? (
                         <>
-                          <div>{r.winner.emoji} {r.winner.name}</div>
+                          <div><TeamBadge team={r.winner} size="sm" /> {r.winner.name}</div>
                           <div className="teamMembers">{teamMembersText(r.winner.id)}</div>
                         </>
                       ) : 'Not yet decided'}
@@ -4906,6 +4942,17 @@ export default function App() {
           />
         );
       })()}
+
+      {confirmState && (
+        <ConfirmDialog
+          message={confirmState.message}
+          danger={confirmState.danger}
+          onResolve={(result) => {
+            confirmState.resolve(result);
+            setConfirmState(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -5131,20 +5178,20 @@ export function SharedLeagueView({ leagueId }) {
             <div className="medalCard medalSilver">
               <div className="medalEmoji">🥈</div>
               <div className="medalPlace">Runner-Up</div>
-              <div className="medalTeamName">{medalWinners.silver.emoji} {medalWinners.silver.name}</div>
+              <div className="medalTeamName"><TeamBadge team={medalWinners.silver} size="sm" /> {medalWinners.silver.name}</div>
               <div className="medalTeamMembers">{teamMembersText(medalWinners.silver.id)}</div>
             </div>
             <div className="medalCard medalGold">
               <div className="medalEmoji">🥇</div>
               <div className="medalPlace">Champion</div>
-              <div className="medalTeamName">{medalWinners.gold.emoji} {medalWinners.gold.name}</div>
+              <div className="medalTeamName"><TeamBadge team={medalWinners.gold} size="md" /> {medalWinners.gold.name}</div>
               <div className="medalTeamMembers">{teamMembersText(medalWinners.gold.id)}</div>
             </div>
             {medalWinners.bronze && (
               <div className="medalCard medalBronze">
                 <div className="medalEmoji">🥉</div>
                 <div className="medalPlace">Bronze</div>
-                <div className="medalTeamName">{medalWinners.bronze.emoji} {medalWinners.bronze.name}</div>
+                <div className="medalTeamName"><TeamBadge team={medalWinners.bronze} size="sm" /> {medalWinners.bronze.name}</div>
                 <div className="medalTeamMembers">{teamMembersText(medalWinners.bronze.id)}</div>
               </div>
             )}
@@ -5167,7 +5214,7 @@ export function SharedLeagueView({ leagueId }) {
                   <td>
                     {r.winner ? (
                       <>
-                        <div>{r.winner.emoji} {r.winner.name}</div>
+                        <div><TeamBadge team={r.winner} size="sm" /> {r.winner.name}</div>
                         <div className="teamMembers">{teamMembersText(r.winner.id)}</div>
                       </>
                     ) : 'Not yet decided'}
@@ -5199,14 +5246,14 @@ export function SharedLeagueView({ leagueId }) {
                 <div className="teamVsBlock">
                   <div>
                     <div className="pill" style={{ background: `${team(match.team1_id)?.color}33`, color: team(match.team1_id)?.color }}>
-                      {team(match.team1_id)?.emoji} {team(match.team1_id)?.name}
+                      <TeamBadge team={team(match.team1_id)} size="sm" /> {team(match.team1_id)?.name}
                     </div>
                     <div className="teamMembers">{teamMembersText(match.team1_id)}</div>
                   </div>
                   <div className="scoreBig">VS</div>
                   <div>
                     <div className="pill" style={{ background: `${team(match.team2_id)?.color}33`, color: team(match.team2_id)?.color }}>
-                      {team(match.team2_id)?.emoji} {team(match.team2_id)?.name}
+                      <TeamBadge team={team(match.team2_id)} size="sm" /> {team(match.team2_id)?.name}
                     </div>
                     <div className="teamMembers">{teamMembersText(match.team2_id)}</div>
                   </div>
@@ -5259,7 +5306,7 @@ function Standings({ rows, type, onSelectPlayer, awayLabel, title, qualifiedTeam
                 <td>{i + 1}</td>
                 <td>
                     <div className="pill" style={{ background: `${s.team.color}33`, color: s.team.color }}>
-                      {s.team.emoji} {s.team.name}
+                      <TeamBadge team={s.team} size="sm" /> {s.team.name}
                     </div>
                     {qualifiedTeamIds?.has(s.team.id) && (
                       <span className="pill" title="Qualified for Knockouts" style={{ marginLeft: 6, background: '#22c55e33', color: '#22c55e' }}>
@@ -5488,12 +5535,20 @@ function FunStats({ data, onSelectPlayer }) {
 }
 
 function PlayerDashboardModal({ row, rank, weekOnly, onClose }) {
+  // Play the exit animation before actually unmounting, so closing the
+  // modal reads as the card leaving rather than a hard cut.
+  const [closing, setClosing] = useState(false);
+  function dismiss() {
+    setClosing(true);
+    setTimeout(onClose, 150);
+  }
+
   return (
-    <div className="modalOverlay" onClick={onClose}>
-      <div className="modalCard card" onClick={(e) => e.stopPropagation()}>
+    <div className={`modalOverlay${closing ? ' closing' : ''}`} onClick={dismiss}>
+      <div className={`modalCard card${closing ? ' closing' : ''}`} onClick={(e) => e.stopPropagation()}>
         <div className="row" style={{ justifyContent: 'space-between' }}>
           <h2>{row?.displayName || 'Player'}</h2>
-          <button className="btn secondary" onClick={onClose}>Close</button>
+          <button className="btn secondary" onClick={dismiss}>Close</button>
         </div>
 
         {!row ? (
@@ -5551,6 +5606,32 @@ function PlayerDashboardModal({ row, rank, weekOnly, onClose }) {
             </table>
           </>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Async, styled replacement for window.confirm(). `danger` (default true)
+// switches the confirm button to the red/destructive style and copy —
+// so a routine "reset scores" no longer looks identical to "delete league",
+// which is what trained people to click through the browser's confirm().
+function ConfirmDialog({ message, danger = true, onResolve }) {
+  const [closing, setClosing] = useState(false);
+  function finish(result) {
+    setClosing(true);
+    setTimeout(() => onResolve(result), 150);
+  }
+
+  return (
+    <div className={`modalOverlay${closing ? ' closing' : ''}`} onClick={() => finish(false)}>
+      <div className={`modalCard confirmCard card${closing ? ' closing' : ''}`} onClick={(e) => e.stopPropagation()}>
+        <p className="confirmMessage">{message}</p>
+        <div className="row confirmActions">
+          <button className="btn secondary" onClick={() => finish(false)}>Cancel</button>
+          <button className={`btn ${danger ? 'danger' : ''}`} onClick={() => finish(true)}>
+            {danger ? 'Delete' : 'Confirm'}
+          </button>
+        </div>
       </div>
     </div>
   );

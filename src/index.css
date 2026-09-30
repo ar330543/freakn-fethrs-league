@@ -5,6 +5,15 @@
   --muted: #aaa;
   --green: #4ade80;
   --line: #2a2a2a;
+
+  /* Motion: one settle curve (decelerate) for everything arriving,
+     a quicker linear-ish ease for anything leaving. Response is kept
+     short (140-220ms) — snappy, not showy. */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.4, 0, 1, 1);
+  --duration-press: 100ms;
+  --duration-enter: 220ms;
+  --duration-exit: 150ms;
 }
 
 * { box-sizing: border-box; }
@@ -65,6 +74,8 @@ button { cursor: pointer; }
   border-radius: 12px;
   font-weight: 900;
   text-transform: uppercase;
+  transition: background var(--duration-press) ease-out, border-color var(--duration-press) ease-out,
+    box-shadow var(--duration-press) ease-out, transform var(--duration-press) ease-out;
 }
 
 .nav button.active, .nav button:hover {
@@ -72,6 +83,8 @@ button { cursor: pointer; }
   border-color: rgba(255,45,22,.55);
   box-shadow: inset 4px 0 0 var(--red);
 }
+
+.nav button:active { transform: scale(0.98); }
 
 .main { padding: 28px; max-width: 1320px; width: 100%; margin: auto; }
 
@@ -91,6 +104,14 @@ h3 { font-size: 25px; color: var(--gold); }
   padding: 18px;
   margin-bottom: 16px;
   box-shadow: 0 0 42px rgba(255,45,22,.07);
+  animation: cardIn var(--duration-enter) var(--ease-out) both;
+}
+
+/* Plays once per mount (tab switch, new row, etc.) — a settled page never
+   replays it, so it reads as content arriving, not a persistent wobble. */
+@keyframes cardIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .grid { display: grid; gap: 16px; }
@@ -115,7 +136,10 @@ input, textarea, select {
   border: 1px solid #333;
   background: #0a0a0a;
   color: #fff;
+  transition: border-color var(--duration-press) ease-out;
 }
+
+input:focus, textarea:focus, select:focus { border-color: var(--orange); }
 
 textarea { min-height: 120px; }
 
@@ -127,12 +151,27 @@ textarea { min-height: 120px; }
   color: white;
   background: linear-gradient(90deg, var(--red), var(--orange));
   text-transform: uppercase;
+  transition: transform var(--duration-press) ease-out, filter var(--duration-press) ease-out,
+    opacity var(--duration-press) ease-out, box-shadow var(--duration-press) ease-out;
 }
 
+.btn:hover:not(:disabled) { filter: brightness(1.08); }
+/* Fires on press-down (browsers apply :active on pointerdown), not on release —
+   feedback has to be instant or it reads as dead, especially on touch where
+   there's no hover at all. */
+.btn:active:not(:disabled) { transform: scale(0.97); filter: brightness(0.94); }
+
 .btn.secondary { background: #202020; border: 1px solid #383838; }
+.btn.secondary:hover:not(:disabled) { filter: brightness(1.35); }
 .btn.danger { background: #961b1b; }
 .btn.green { background: #166534; }
 .btn:disabled { opacity: 0.4; cursor: default; }
+
+button:focus-visible, a:focus-visible, [tabindex]:focus-visible,
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--orange);
+  outline-offset: 2px;
+}
 
 table { width: 100%; border-collapse: collapse; }
 .swipeHint { display: none; }
@@ -350,19 +389,58 @@ th { color: #999; font-size: 12px; text-transform: uppercase; letter-spacing: 1p
 .modalOverlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, .7);
+  background: rgba(0, 0, 0, .55);
+  backdrop-filter: blur(6px);
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding: 40px 16px;
   overflow-y: auto;
   z-index: 100;
+  animation: overlayIn var(--duration-enter) ease-out both;
 }
+.modalOverlay.closing { animation: overlayOut var(--duration-exit) var(--ease-in) both; }
+
 .modalCard {
   width: 100%;
   max-width: 720px;
   height: fit-content;
+  animation: modalPopIn var(--duration-enter) var(--ease-out) both;
 }
+.modalCard.closing { animation: modalPopOut var(--duration-exit) var(--ease-in) both; }
+
+@keyframes overlayIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes overlayOut { from { opacity: 1; } to { opacity: 0; } }
+@keyframes modalPopIn {
+  from { opacity: 0; transform: translateY(10px) scale(.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes modalPopOut {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(6px) scale(.97); }
+}
+
+.confirmCard { max-width: 420px; }
+.confirmMessage { font-size: 16px; line-height: 1.5; margin: 4px 0 22px; }
+.confirmActions { justify-content: flex-end; }
+.confirmActions .btn { flex: 0 0 auto; min-width: 100px; }
+
+.teamBadge {
+  display: inline-grid;
+  place-items: center;
+  border-radius: 50%;
+  line-height: 1;
+  flex-shrink: 0;
+  vertical-align: middle;
+  margin-right: 7px;
+  background: radial-gradient(circle at 32% 26%,
+    color-mix(in srgb, var(--badge-color, #888) 55%, white 18%),
+    color-mix(in srgb, var(--badge-color, #888) 78%, black 35%));
+  box-shadow: 0 0 0 2px rgba(255,255,255,.10), 0 3px 8px rgba(0,0,0,.4);
+}
+.teamBadge-sm { width: 24px; height: 24px; font-size: 13px; }
+.teamBadge-md { width: 34px; height: 34px; font-size: 18px; }
+.teamBadge-lg { width: 56px; height: 56px; font-size: 30px; }
 
 .sectionDivider {
   height: 1px;
@@ -788,4 +866,15 @@ body {
     min-height: 50px;
     font-size: 19px;
   }
+}
+
+/* Reduced motion: keep feedback (color/opacity), drop movement. */
+@media (prefers-reduced-motion: reduce) {
+  .card, .medalCard, .modalOverlay, .modalCard,
+  .modalOverlay.closing, .modalCard.closing,
+  .nav button, .btn {
+    animation: none !important;
+    transition: none !important;
+  }
+  .btn:active:not(:disabled) { transform: none; }
 }
