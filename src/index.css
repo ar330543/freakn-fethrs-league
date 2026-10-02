@@ -426,21 +426,67 @@ th { color: #999; font-size: 12px; text-transform: uppercase; letter-spacing: 1p
 .confirmActions .btn { flex: 0 0 auto; min-width: 100px; }
 
 .teamBadge {
-  display: inline-grid;
-  place-items: center;
+  display: inline-block;
   border-radius: 50%;
-  line-height: 1;
+  overflow: hidden;
   flex-shrink: 0;
   vertical-align: middle;
   margin-right: 7px;
-  background: radial-gradient(circle at 32% 26%,
-    color-mix(in srgb, var(--badge-color, #888) 55%, white 18%),
-    color-mix(in srgb, var(--badge-color, #888) 78%, black 35%));
-  box-shadow: 0 0 0 2px rgba(255,255,255,.10), 0 3px 8px rgba(0,0,0,.4);
+  background: radial-gradient(circle at 35% 25%,
+    color-mix(in srgb, var(--badge-color, #888) 14%, #fbf8f3),
+    color-mix(in srgb, var(--badge-color, #888) 30%, #e9e4dc));
+  box-shadow: 0 0 0 2px var(--badge-color, #888), 0 3px 8px rgba(0,0,0,.4);
 }
-.teamBadge-sm { width: 24px; height: 24px; font-size: 13px; }
-.teamBadge-md { width: 34px; height: 34px; font-size: 18px; }
-.teamBadge-lg { width: 56px; height: 56px; font-size: 30px; }
+.teamBadge svg { width: 100%; height: 100%; display: block; overflow: visible; }
+.teamBadge-sm { width: 28px; height: 28px; }
+.teamBadge-md { width: 38px; height: 38px; }
+.teamBadge-lg { width: 64px; height: 64px; }
+
+/* Winner: gold ring, players hop in turn and wave rackets, shuttle pops up. */
+.teamBadge-win {
+  box-shadow: 0 0 0 2px #fbbf24, 0 0 14px rgba(251,191,36,.55), 0 3px 8px rgba(0,0,0,.4);
+}
+.teamBadge-win .avHop { animation: avHop 1.8s cubic-bezier(.3,0,.3,1) infinite; }
+.teamBadge-win .avHop-late { animation-delay: .22s; }
+.teamBadge-win .avRacket {
+  transform-box: fill-box;
+  transform-origin: 100% 100%;
+  animation: avWave .45s ease-in-out infinite alternate;
+}
+.teamBadge-win .avShuttle { animation: avShuttle 1.8s cubic-bezier(.3,0,.3,1) infinite; }
+@keyframes avHop {
+  0%, 45%, 100% { transform: translateY(0); }
+  18% { transform: translateY(-6px); }
+  32% { transform: translateY(0) scaleY(.96); }
+}
+@keyframes avWave {
+  from { transform: rotate(-14deg); }
+  to { transform: rotate(10deg); }
+}
+@keyframes avShuttle {
+  0%, 100% { transform: translate(32px, 14px); opacity: 0; }
+  20% { opacity: 1; }
+  40% { transform: translate(32px, 6px) rotate(180deg); opacity: 1; }
+  70% { transform: translate(32px, 12px) rotate(360deg); opacity: 0; }
+}
+
+/* Loser: static, slumped pose (drawn in the SVG) and drained colors. */
+.teamBadge-lose { filter: saturate(.25) brightness(.85); opacity: .8; }
+
+.teamLabelWin .pill { box-shadow: 0 0 0 1px #fbbf24; }
+.teamLabelLose { opacity: .7; }
+.resultTag {
+  display: inline-block; margin-left: 8px; padding: 2px 7px; border-radius: 999px;
+  font-size: 11px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; vertical-align: middle;
+}
+.resultTag-win { background: #fbbf24; color: #1a1300; }
+.resultTag-lose { background: #333; color: #aaa; }
+.teamLabelAvatar { margin-bottom: 8px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .teamBadge-win .avHop, .teamBadge-win .avRacket { animation: none; }
+  .teamBadge-win .avShuttle { animation: none; transform: translate(32px, 9px); }
+}
 
 .sectionDivider {
   height: 1px;
