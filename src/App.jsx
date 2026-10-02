@@ -1121,6 +1121,10 @@ export default function App() {
   const [regularPlayers, setRegularPlayers] = useState([]);
   const [regularNames, setRegularNames] = useState('');
   const [selectedPlayerName, setSelectedPlayerName] = useState(null);
+  // When the popup is opened from Overall Standings, its stats come from the
+  // same weeks as that table (this league or all leagues) instead of the
+  // current league's Rankings. null = use Rankings / this week as before.
+  const [dashboardScope, setDashboardScope] = useState(null);
   const [clubNameDraft, setClubNameDraft] = useState('');
   const [opponentNames, setOpponentNames] = useState('');
   const [interClubMode, setInterClubMode] = useState('auto');
@@ -2220,8 +2224,33 @@ export default function App() {
   }
 
   async function openPlayerDashboard(rawName) {
+    setDashboardScope(null);
     setSelectedPlayerName(normalizePlayerName(rawName));
     await loadLeagueRankings();
+  }
+
+  // Overall Standings rows can be players from other leagues (All Leagues)
+  // or from weeks Rankings skips, so load stats over the table's own weeks.
+  async function openOverallPlayerDashboard(rawName) {
+    const scope = overallScope;
+    setDashboardScope({ scope, rows: null });
+    setSelectedPlayerName(normalizePlayerName(rawName));
+    try {
+      let query = supabase
+        .from('weeks')
+        .select('id, name, created_at, format')
+        .not('format', 'in', '(inter_club,inter_club_league)');
+      if (scope === 'league') query = query.eq('league_id', leagueId);
+      const { data: scopeWeeks, error: wErr } = await query;
+      if (wErr) throw wErr;
+      const raw = await fetchFormRawData((scopeWeeks || []).map((w) => w.id));
+      const rows = computeLeagueFormStats(scopeWeeks || [], raw.playersRows, raw.matchesRows, raw.gamesRows, raw.scoresRows);
+      setDashboardScope((current) => (current?.scope === scope ? { scope, rows } : current));
+    } catch (err) {
+      setDashboardScope(null);
+      setSelectedPlayerName(null);
+      fail(err.message || String(err));
+    }
   }
 
   // Jumps to the Tournament Progress card (Semifinals/Bronze/Grand Final)
@@ -5001,7 +5030,7 @@ export default function App() {
                   <button className="btn danger" onClick={clearOverallLeaderboard}>Clear Leaderboard</button>
                 </div>
 
-                <Standings rows={overallRows} type="player" onSelectPlayer={openPlayerDashboard} />
+                <Standings rows={overallRows} type="player" onSelectPlayer={openOverallPlayerDashboard} />
               </>
             ) : (
               <>
@@ -5010,7 +5039,7 @@ export default function App() {
                   <button className="btn secondary" onClick={loadAllLeaguesOverall} style={{ marginLeft: 8 }}>Refresh</button>
                 </p>
 
-                <Standings rows={allLeaguesOverallRows} type="player" onSelectPlayer={openPlayerDashboard} />
+                <Standings rows={allLeaguesOverallRows} type="player" onSelectPlayer={openOverallPlayerDashboard} />
               </>
             )}
           </div>
@@ -5061,7 +5090,21 @@ export default function App() {
         )}
       </main>
 
-      {selectedPlayerName && (() => {
+      {selectedPlayerName && dashboardScope && (() => {
+        const scopeRows = dashboardScope.rows || [];
+        const index = scopeRows.findIndex((r) => r.normalizedName === selectedPlayerName);
+        return (
+          <PlayerDashboardModal
+            row={scopeRows[index]}
+            rank={index + 1}
+            loading={!dashboardScope.rows}
+            scopeNote={dashboardScope.scope === 'all' ? 'Across all leagues (Inter-Club weeks not included).' : `Across ${league?.name || 'this league'} (Inter-Club weeks not included).`}
+            onClose={() => { setSelectedPlayerName(null); setDashboardScope(null); }}
+          />
+        );
+      })()}
+
+      {selectedPlayerName && !dashboardScope && (() => {
         const rankingRow = rankingRows.find((r) => r.normalizedName === selectedPlayerName);
         const row = rankingRow || currentWeekFormRows.find((r) => r.normalizedName === selectedPlayerName);
         const rank = rankingRow
@@ -5668,7 +5711,7 @@ function FunStats({ data, onSelectPlayer }) {
   );
 }
 
-function PlayerDashboardModal({ row, rank, weekOnly, onClose }) {
+function PlayerDashboardModal({ row, rank, weekOnly, loading, scopeNote, onClose }) {
   // Play the exit animation before actually unmounting, so closing the
   // modal reads as the card leaving rather than a hard cut.
   const [closing, setClosing] = useState(false);
@@ -5681,14 +5724,17 @@ function PlayerDashboardModal({ row, rank, weekOnly, onClose }) {
     <div className={`modalOverlay${closing ? ' closing' : ''}`} onClick={dismiss}>
       <div className={`modalCard card${closing ? ' closing' : ''}`} onClick={(e) => e.stopPropagation()}>
         <div className="row" style={{ justifyContent: 'space-between' }}>
-          <h2>{row?.displayName || 'Player'}</h2>
+          <h2>{row?.displayName || (loading ? 'Loading…' : 'Player')}</h2>
           <button className="btn secondary" onClick={dismiss}>Close</button>
         </div>
 
-        {!row ? (
+        {loading ? (
+          <div className="emptyState">Loading stats…</div>
+        ) : !row ? (
           <div className="emptyState">No game history yet.</div>
         ) : (
           <>
+            {scopeNote && <p className="muted">{scopeNote}</p>}
             {weekOnly && (
               <p className="muted">
                 Showing this week only — Inter-Club League weeks (and opponent-club players)
