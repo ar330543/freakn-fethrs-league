@@ -43,40 +43,165 @@ const STAGE_LABELS = {
   bronze: 'Bronze Medal Match',
 };
 
-// Auto-generated team identities: [name, emoji, color]. Each new team is
-// assigned the next one in rotation (buildBalancedTeamDefs / etc. below),
-// so within a set of teams every mascot+color pairing is distinct; across
-// sets they repeat, which reads as "randomly assigned" without a team's
-// badge ever changing on reload — same team, same look, every time.
-const teamColors = [
-  ['Falcons', '🦅', '#ef4444'],
-  ['Blaze', '🔥', '#f97316'],
-  ['Bolts', '⚡', '#eab308'],
-  ['Vipers', '🐍', '#84cc16'],
-  ['Sharks', '🦈', '#22c55e'],
-  ['Storm', '🌪️', '#14b8a6'],
-  ['Waves', '🌊', '#38bdf8'],
-  ['Nova', '✨', '#6366f1'],
-  ['Vortex', '🌀', '#a78bfa'],
-  ['Scorpions', '🦂', '#d946ef'],
-  ['Titans', '🦁', '#ec4899'],
-  ['Wolves', '🐺', '#71717a'],
+// Auto-generated team identities: [name, color]. Each new team is assigned
+// the next one in rotation (buildBalancedTeamDefs / etc. below), so within a
+// set of teams every name+color is distinct. The name is just the color, so
+// the label and the badge tint always agree.
+const teamPalette = [
+  ['Crimson', '#ef4444'],
+  ['Amber', '#f97316'],
+  ['Gold', '#eab308'],
+  ['Lime', '#84cc16'],
+  ['Jade', '#22c55e'],
+  ['Teal', '#14b8a6'],
+  ['Sky', '#38bdf8'],
+  ['Indigo', '#6366f1'],
+  ['Violet', '#a78bfa'],
+  ['Magenta', '#d946ef'],
+  ['Rose', '#ec4899'],
+  ['Slate', '#71717a'],
 ];
 
-// A team's "profile pic": its assigned emoji on a gradient disc tinted from
-// its assigned color. Reused everywhere a team's identity shows (team
-// cards, podium, standings, live match cards) so the same team always
-// reads as the same badge.
-function TeamBadge({ team, size = 'md' }) {
+function paletteTeamDef(index) {
+  const [name, color] = teamPalette[index % teamPalette.length];
+  return { name, emoji: '🏸', color };
+}
+
+// Inter-Club League teams aren't named — they're identified by who's on them.
+function playerPairName(teamPlayers) {
+  const names = teamPlayers.map((p) => p.name);
+  if (names.length <= 2) return names.join(' & ');
+  return `${names.slice(0, -1).join(', ')} & ${names[names.length - 1]}`;
+}
+
+// A team's "profile pic": a cartoon pair of badminton players in the team's
+// shirt color, drawn as inline SVG. Skin tone and hairstyle for each player
+// are picked from a hash of the team id (falling back to name for unsaved
+// previews), so the same team always looks the same everywhere.
+//
+// `mood` reflects a finished match: 'win' jumps and waves rackets (the
+// shuttle pops up between them), 'lose' slumps with rackets down and faded
+// colors, anything else is the neutral ready stance.
+const SKIN_TONES = ['#f6d3b3', '#e8b48f', '#c98e64', '#a46b45', '#6f4630'];
+const HAIR_COLORS = ['#1f1a17', '#3b2a20', '#6b4a2b', '#c8a165', '#8a8a8a'];
+const HAIR_STYLES = 5;
+
+function hashSeed(seed) {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
+function playerLook(hash, shift) {
+  const n = hash >>> shift;
+  return {
+    skin: SKIN_TONES[n % SKIN_TONES.length],
+    hairColor: HAIR_COLORS[(n >>> 3) % HAIR_COLORS.length],
+    hairStyle: (n >>> 6) % HAIR_STYLES,
+  };
+}
+
+function AvatarHair({ style, color }) {
+  const crop = <path d="M-6.3,-0.4 A6.3,6.3 0 0 1 6.3,-0.4 Q3,-3.6 -6.3,-0.4Z" fill={color} />;
+  switch (style) {
+    case 1: // spiky
+      return <path d="M-6.2,-0.6 L-5.4,-6 L-2.8,-4.6 L0,-7.8 L2.8,-4.6 L5.4,-6 L6.2,-0.6 Q0,-4 -6.2,-0.6Z" fill={color} />;
+    case 2: // bun
+      return <g fill={color}>{crop}<circle cx="0" cy="-7" r="2.6" /></g>;
+    case 3: // sweatband
+      return <g>{crop}<path d="M-6,-1.6 L6,-1.6" stroke="#fff" strokeWidth="1.8" /></g>;
+    case 4: // long
+      return <path d="M-6.6,4 L-6.6,-0.8 A6.6,6.6 0 0 1 6.6,-0.8 L6.6,4 L4.8,4 L4.8,-1 Q0,-3.4 -4.8,-1 L-4.8,4Z" fill={color} />;
+    default:
+      return crop;
+  }
+}
+
+// One player, feet at (0,0), racket in the left hand. Mirrored for the
+// partner so both rackets sit on the outside.
+function AvatarPlayer({ look, shirt, mood }) {
+  const racketArm = {
+    win: { hand: [-8.5, -31], tip: [-9.5, -35.5], head: [-10.2, -41], tilt: -8 },
+    lose: { hand: [-7.5, -11], tip: [-8.4, -7], head: [-9.6, -2], tilt: 12 },
+  }[mood] || { hand: [-10.5, -23.5], tip: [-12.4, -27.6], head: [-14.2, -32.8], tilt: -20 };
+  const freeHand = { win: [9, -30], lose: [6.6, -10] }[mood] || [8.4, -11.5];
+  const headY = mood === 'lose' ? -24.6 : -26;
+
+  return (
+    <g>
+      <path d="M-2.6,-8 L-3,0 M2.6,-8 L3,0" stroke="#2b2b33" strokeWidth="3" strokeLinecap="round" />
+      <rect x="-6" y="-11" width="12" height="4.5" rx="1.5" fill="#2b2b33" />
+      <rect x="-6" y="-20" width="12" height="11" rx="4" fill={shirt} />
+      <path d="M-2.4,-20 L0,-17.2 L2.4,-20" stroke="#fff" strokeWidth="1" fill="none" opacity=".85" />
+      <path d={`M5,-18 L${freeHand[0]},${freeHand[1]}`} stroke={look.skin} strokeWidth="3" strokeLinecap="round" />
+      <g className="avRacket">
+        <path d={`M-5,-18 L${racketArm.hand[0]},${racketArm.hand[1]}`} stroke={look.skin} strokeWidth="3" strokeLinecap="round" />
+        <path d={`M${racketArm.hand[0]},${racketArm.hand[1]} L${racketArm.tip[0]},${racketArm.tip[1]}`} stroke="#2b2b33" strokeWidth="1.4" strokeLinecap="round" />
+        <ellipse
+          cx={racketArm.head[0]} cy={racketArm.head[1]} rx="3.6" ry="5.2"
+          transform={`rotate(${racketArm.tilt} ${racketArm.head[0]} ${racketArm.head[1]})`}
+          fill="rgba(255,255,255,.55)" stroke="#2b2b33" strokeWidth="1.3"
+        />
+      </g>
+      <g transform={`translate(0 ${headY})`}>
+        <circle r="6" fill={look.skin} />
+        <AvatarHair style={look.hairStyle} color={look.hairColor} />
+        {mood === 'win' ? (
+          <>
+            <path d="M-3,1 Q-2.2,-0.4 -1.4,1 M1.4,1 Q2.2,-0.4 3,1" stroke="#2b2b33" strokeWidth=".9" fill="none" strokeLinecap="round" />
+            <path d="M-2.4,2.4 Q0,6.2 2.4,2.4Z" fill="#2b2b33" />
+          </>
+        ) : mood === 'lose' ? (
+          <>
+            <path d="M-3,1.2 L-1.5,1.6 M1.5,1.6 L3,1.2" stroke="#2b2b33" strokeWidth=".9" strokeLinecap="round" />
+            <path d="M-1.8,4.4 Q0,3 1.8,4.4" stroke="#2b2b33" strokeWidth=".9" fill="none" strokeLinecap="round" />
+          </>
+        ) : (
+          <>
+            <circle cx="-2.2" cy="0.8" r=".85" fill="#2b2b33" />
+            <circle cx="2.2" cy="0.8" r=".85" fill="#2b2b33" />
+            <path d="M-2,2.8 Q0,4.4 2,2.8" stroke="#2b2b33" strokeWidth=".9" fill="none" strokeLinecap="round" />
+          </>
+        )}
+      </g>
+    </g>
+  );
+}
+
+function TeamBadge({ team, size = 'md', mood }) {
   if (!team) return null;
+  const hash = hashSeed(String(team.id || team.name));
+  const shirt = team.color || '#888';
   return (
     <span
-      className={`teamBadge teamBadge-${size}`}
-      style={{ '--badge-color': team.color }}
+      className={`teamBadge teamBadge-${size}${mood ? ` teamBadge-${mood}` : ''}`}
+      style={{ '--badge-color': shirt }}
       role="img"
-      aria-label={team.name}
+      aria-label={mood ? `${team.name} (${mood === 'win' ? 'won' : 'lost'})` : team.name}
     >
-      {team.emoji}
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        {mood === 'win' && (
+          <g className="avShuttle" transform="translate(32 12)">
+            <path d="M-2.6,-4 L2.6,-4 L1.4,1 L-1.4,1Z" fill="#fff" stroke="#2b2b33" strokeWidth=".6" />
+            <circle cy="2" r="1.6" fill="#e5484d" />
+          </g>
+        )}
+        <g transform="translate(21 57)">
+          <g className="avHop">
+            <AvatarPlayer look={playerLook(hash, 0)} shirt={shirt} mood={mood} />
+          </g>
+        </g>
+        <g transform="translate(43 57)">
+          <g className="avHop avHop-late">
+            <g transform="scale(-1 1)">
+              <AvatarPlayer look={playerLook(hash, 13)} shirt={shirt} mood={mood} />
+            </g>
+          </g>
+        </g>
+      </svg>
     </span>
   );
 }
@@ -304,9 +429,7 @@ function buildBalancedTeamDefs(teamPlayers, count) {
   const remainder = teamPlayers.length % count;
 
   return Array.from({ length: count }, (_, index) => ({
-    name: teamColors[index % teamColors.length][0],
-    emoji: teamColors[index % teamColors.length][1],
-    color: teamColors[index % teamColors.length][2],
+    ...paletteTeamDef(index),
     targetSize: baseSize + (index < remainder ? 1 : 0),
     players: [],
   }));
@@ -1361,14 +1484,27 @@ export default function App() {
     return members.length ? members.join(' · ') : 'No players assigned';
   }
 
-  function TeamLabel({ teamId }) {
+  // Win/lose moods for a match's two teams — only once every game is scored,
+  // so a half-entered match doesn't crown anyone early.
+  function matchMoods(match) {
+    if (!matchIsComplete(match, games, scores)) return {};
+    const { winnerTeamId } = getMatchResult(match, games, scores);
+    return {
+      team1: winnerTeamId === match.team1_id ? 'win' : 'lose',
+      team2: winnerTeamId === match.team2_id ? 'win' : 'lose',
+    };
+  }
+
+  function TeamLabel({ teamId, mood }) {
     const t = team(teamId);
     if (!t) return <span>-</span>;
     const members = playersForTeam(teamId);
     return (
-      <div>
+      <div className={mood === 'win' ? 'teamLabelWin' : mood === 'lose' ? 'teamLabelLose' : undefined}>
+        <div className="teamLabelAvatar"><TeamBadge team={t} size="lg" mood={mood} /></div>
         <div className="pill" style={{ background: `${t.color}33`, color: t.color }}>
-          <TeamBadge team={t} size="sm" /> {t.name}
+          {t.name}
+          {mood && <span className={`resultTag resultTag-${mood}`}>{mood === 'win' ? 'Winner' : 'Lost'}</span>}
         </div>
         <div className="teamMembers">
           {members.length
@@ -2313,9 +2449,7 @@ export default function App() {
     if (assignedIds.length !== players.length) return fail(`Assign all players before saving. ${players.length - assignedIds.length} unassigned.`);
 
     const defs = Array.from({ length: count }, (_, i) => ({
-      name: teamColors[i % teamColors.length][0],
-      emoji: teamColors[i % teamColors.length][1],
-      color: teamColors[i % teamColors.length][2],
+      ...paletteTeamDef(i),
       players: [],
     }));
 
@@ -2363,15 +2497,15 @@ export default function App() {
     }
 
     const defs = Array.from({ length: count }, (_, i) => ({
-      name: `${club.name} ${teamColors[i % teamColors.length][0]}`,
-      emoji: teamColors[i % teamColors.length][1],
-      color: teamColors[i % teamColors.length][2],
+      ...paletteTeamDef(i),
+      name: `Team ${i + 1}`,
       players: [],
     }));
 
     clubPlayers.forEach((p) => defs[Number(assignments[p.id])].players.push(p));
     const smallTeam = defs.find((t) => t.players.length < 2);
     if (smallTeam) return fail(`${smallTeam.name} has fewer than 2 players.`);
+    defs.forEach((d) => { d.name = playerPairName(d.players); });
 
     await act(async () => {
       const existingClubTeamIds = teams.filter((t) => t.club_id === club.id).map((t) => t.id);
@@ -2775,9 +2909,9 @@ export default function App() {
             Set {gameMatch?.set_number ?? '-'} · Slot {gameMatch?.slot ?? '-'} · Court {gameMatch?.court ?? '-'} · Game {game.game_number}
           </b>
           <span className="muted">
-            {team(gameMatch?.team1_id)?.emoji} {team(gameMatch?.team1_id)?.name || '-'}
+            <TeamBadge team={team(gameMatch?.team1_id)} size="sm" /> {team(gameMatch?.team1_id)?.name || '-'}
             {' '}vs{' '}
-            {team(gameMatch?.team2_id)?.emoji} {team(gameMatch?.team2_id)?.name || '-'}
+            <TeamBadge team={team(gameMatch?.team2_id)} size="sm" /> {team(gameMatch?.team2_id)?.name || '-'}
           </span>
         </div>
         {editor}
@@ -2803,9 +2937,9 @@ export default function App() {
         </div>
 
         <div className="teamVsBlock">
-          <TeamLabel teamId={match.team1_id} />
+          <TeamLabel teamId={match.team1_id} mood={matchMoods(match).team1} />
           <div className="scoreBig">VS</div>
-          <TeamLabel teamId={match.team2_id} />
+          <TeamLabel teamId={match.team2_id} mood={matchMoods(match).team2} />
         </div>
 
         {games
@@ -3899,7 +4033,7 @@ export default function App() {
                           <div className="manualGrid">
                             {Array.from({ length: Number(clubM.teamCount) || 0 }, (_, i) => (
                               <div className="card" key={i}>
-                                <h3>{teamColors[i % teamColors.length][1]} {c.name} {teamColors[i % teamColors.length][0]}</h3>
+                                <h3><TeamBadge team={{ ...paletteTeamDef(i), name: `${c.id}-${i}` }} size="sm" /> Team {i + 1}</h3>
                                 {clubPlayers.map((p) => (
                                   <label className="checkrow" key={p.id}>
                                     <input
@@ -4061,7 +4195,7 @@ export default function App() {
                     <div className="manualGrid">
                       {Array.from({ length: Number(manual.teamCount) || 0 }, (_, i) => (
                         <div className="card" key={i}>
-                          <h3>{teamColors[i % teamColors.length][1]} {teamColors[i % teamColors.length][0]}</h3>
+                          <h3><TeamBadge team={paletteTeamDef(i)} size="sm" /> {paletteTeamDef(i).name}</h3>
                           {players.map((p) => (
                             <label className="checkrow" key={p.id}>
                               <input
@@ -4204,7 +4338,7 @@ export default function App() {
                           onChange={(e) => setKnockoutOverride(p.seedIndex, 'team1Id', e.target.value)}
                         >
                           <option value="">Select Team</option>
-                          {teams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                          {teams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                         </select>
                         <span>vs</span>
                         <select
@@ -4212,7 +4346,7 @@ export default function App() {
                           onChange={(e) => setKnockoutOverride(p.seedIndex, 'team2Id', e.target.value)}
                         >
                           <option value="">Select Team</option>
-                          {teams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                          {teams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                         </select>
                       </div>
                     ))}
@@ -4286,7 +4420,7 @@ export default function App() {
                               onChange={(e) => setSemifinalOverride(p.bracketOrder, 'team1Id', e.target.value)}
                             >
                               <option value="">Select Team</option>
-                              {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                              {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                             </select>
                             <span>vs</span>
                             <select
@@ -4294,7 +4428,7 @@ export default function App() {
                               onChange={(e) => setSemifinalOverride(p.bracketOrder, 'team2Id', e.target.value)}
                             >
                               <option value="">Select Team</option>
-                              {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                              {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                             </select>
                           </div>
                         ))}
@@ -4320,7 +4454,7 @@ export default function App() {
                                     onChange={(e) => setGrandFinalOverrideSide('team1Id', e.target.value)}
                                   >
                                     <option value="">Select Team</option>
-                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                   </select>
                                   <span>vs</span>
                                   <select
@@ -4328,7 +4462,7 @@ export default function App() {
                                     onChange={(e) => setGrandFinalOverrideSide('team2Id', e.target.value)}
                                   >
                                     <option value="">Select Team</option>
-                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                   </select>
                                 </div>
                                 <button className="btn green" onClick={confirmGrandFinalMatch}>Confirm Grand Final</button>
@@ -4345,7 +4479,7 @@ export default function App() {
                                     onChange={(e) => setBronzeOverrideSide('team1Id', e.target.value)}
                                   >
                                     <option value="">Select Team</option>
-                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                   </select>
                                   <span>vs</span>
                                   <select
@@ -4353,7 +4487,7 @@ export default function App() {
                                     onChange={(e) => setBronzeOverrideSide('team2Id', e.target.value)}
                                   >
                                     <option value="">Select Team</option>
-                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                    {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                   </select>
                                 </div>
                                 <button className="btn green" onClick={confirmBronzeMatch}>Confirm Bronze Medal Match</button>
@@ -4387,7 +4521,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(1, 'team1Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                           <span>vs</span>
                           <select
@@ -4395,7 +4529,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(1, 'team2Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                         </div>
                         <div className="row" style={{ alignItems: 'center' }}>
@@ -4405,7 +4539,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(2, 'team1Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                           <span>vs</span>
                           <select
@@ -4413,7 +4547,7 @@ export default function App() {
                             onChange={(e) => setPlayoffsOverride(2, 'team2Id', e.target.value)}
                           >
                             <option value="">Select Team</option>
-                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                            {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                         </div>
                         <button
@@ -4439,7 +4573,7 @@ export default function App() {
                                   onChange={(e) => setPlayoffsOverride(3, 'team1Id', e.target.value)}
                                 >
                                   <option value="">Select Team</option>
-                                  {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                  {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                 </select>
                                 <span>vs</span>
                                 <select
@@ -4447,7 +4581,7 @@ export default function App() {
                                   onChange={(e) => setPlayoffsOverride(3, 'team2Id', e.target.value)}
                                 >
                                   <option value="">Select Team</option>
-                                  {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                  {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                 </select>
                               </div>
                               <button className="btn green" onClick={confirmQualifier2Match} disabled={!qualifier2Pair}>
@@ -4470,7 +4604,7 @@ export default function App() {
                                           onChange={(e) => setGrandFinalOverrideSide('team1Id', e.target.value)}
                                         >
                                           <option value="">Select Team</option>
-                                          {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                          {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                         </select>
                                         <span>vs</span>
                                         <select
@@ -4478,7 +4612,7 @@ export default function App() {
                                           onChange={(e) => setGrandFinalOverrideSide('team2Id', e.target.value)}
                                         >
                                           <option value="">Select Team</option>
-                                          {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.emoji} {t.name} — {teamMembersText(t.id)}</option>)}
+                                          {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                         </select>
                                       </div>
                                       <button className="btn green" onClick={confirmGrandFinalMatch} disabled={!playoffsGrandFinalPair}>
@@ -4489,7 +4623,7 @@ export default function App() {
 
                                   {playoffsBronzeLoserTeam && (
                                     <p className="muted">
-                                      Bronze medalist (loser of Qualifier 2): <b>{playoffsBronzeLoserTeam.emoji} {playoffsBronzeLoserTeam.name}</b>
+                                      Bronze medalist (loser of Qualifier 2): <b><TeamBadge team={playoffsBronzeLoserTeam} size="sm" /> {playoffsBronzeLoserTeam.name}</b>
                                     </p>
                                   )}
 
@@ -4558,7 +4692,7 @@ export default function App() {
                             (!!quickTeam2Id && !quickTeamOpponentIds.get(quickTeam2Id)?.has(item.id))
                           }
                         >
-                          Set {item.set_number || 1} · {item.emoji} {item.name} — {teamMembersText(item.id)}
+                          Set {item.set_number || 1} · {item.name} — {teamMembersText(item.id)}
                         </option>
                       ))}
                     </select>
@@ -4580,7 +4714,7 @@ export default function App() {
                             (!!quickTeam1Id && !quickTeamOpponentIds.get(quickTeam1Id)?.has(item.id))
                           }
                         >
-                          Set {item.set_number || 1} · {item.emoji} {item.name} — {teamMembersText(item.id)}
+                          Set {item.set_number || 1} · {item.name} — {teamMembersText(item.id)}
                         </option>
                       ))}
                     </select>
@@ -4615,9 +4749,9 @@ export default function App() {
                     </div>
 
                     <div className="teamVsBlock">
-                      <TeamLabel teamId={quickSelectedMatch.team1_id} />
+                      <TeamLabel teamId={quickSelectedMatch.team1_id} mood={matchMoods(quickSelectedMatch).team1} />
                       <div className="scoreBig">VS</div>
-                      <TeamLabel teamId={quickSelectedMatch.team2_id} />
+                      <TeamLabel teamId={quickSelectedMatch.team2_id} mood={matchMoods(quickSelectedMatch).team2} />
                     </div>
 
                     {games
@@ -4704,9 +4838,9 @@ export default function App() {
                       </div>
 
                       <div className="teamVsBlock">
-                        <TeamLabel teamId={match.team1_id} />
+                        <TeamLabel teamId={match.team1_id} mood={matchMoods(match).team1} />
                         <div className="scoreBig">VS</div>
-                        <TeamLabel teamId={match.team2_id} />
+                        <TeamLabel teamId={match.team2_id} mood={matchMoods(match).team2} />
                       </div>
 
                       {games
