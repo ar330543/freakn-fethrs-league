@@ -248,8 +248,9 @@ function validatePlayersPerTeam(playerCount, playersPerTeam) {
 
 function getMatchResult(match, games, scores) {
   let aw = 0, bw = 0, ap = 0, bp = 0, done = 0;
+  const matchGames = games.filter((g) => g.match_id === match.id);
 
-  games.filter((g) => g.match_id === match.id).forEach((game) => {
+  matchGames.forEach((game) => {
     const score = scores.find((s) => s.game_id === game.id) || {};
     if (score.score1 == null || score.score2 == null) return;
     const a = Number(score.score1);
@@ -261,10 +262,15 @@ function getMatchResult(match, games, scores) {
     else if (b > a) bw++;
   });
 
-  const isDraw = done > 0 && aw === bw;
+  // Knockout/playoff matches only have a winner once it's decided (2 wins in
+  // a best of 3) — not whoever leads 1-0. League matches keep the live
+  // leader, since standings are built from games as they're entered.
+  const elimination = isEliminationMatch(match);
+  const isDraw = done > 0 && aw === bw && (!elimination || done === matchGames.length);
+  const decided = elimination ? Math.max(aw, bw) > matchGames.length / 2 : done > 0 && !isDraw;
   let winnerTeamId = null;
   let loserTeamId = null;
-  if (done > 0 && !isDraw) {
+  if (decided) {
     winnerTeamId = aw > bw ? match.team1_id : match.team2_id;
     loserTeamId = aw > bw ? match.team2_id : match.team1_id;
   }
@@ -272,12 +278,23 @@ function getMatchResult(match, games, scores) {
   return { aw, bw, ap, bp, done, winnerTeamId, loserTeamId, isDraw };
 }
 
-// A bracket-stage match is "complete" (safe to advance past) once every one
-// of its games has a score and the result isn't a draw — stricter than
-// teamStandings' "done" check, which only requires at least one scored game.
+function isEliminationMatch(match) {
+  return (match?.stage || 'league') !== 'league';
+}
+
+// A match is "complete" (safe to advance past) once its result can't change.
+// Knockout/playoff matches are first-to-a-majority, so a best-of-3 is done
+// at 2-0 without game 3. League matches still need every game scored, since
+// each game's points feed the standings — stricter than teamStandings'
+// "done" check, which only requires at least one scored game.
 function matchIsComplete(match, games, scores) {
   const matchGames = games.filter((g) => g.match_id === match.id);
   if (!matchGames.length) return false;
+
+  if (isEliminationMatch(match)) {
+    const { aw, bw } = getMatchResult(match, games, scores);
+    return Math.max(aw, bw) > matchGames.length / 2;
+  }
 
   const allScored = matchGames.every((g) => {
     const score = scores.find((s) => s.game_id === g.id) || {};
@@ -288,6 +305,14 @@ function matchIsComplete(match, games, scores) {
   return !getMatchResult(match, games, scores).isDraw;
 }
 
+// An unscored game in an elimination match that's already been decided
+// (game 3 of a best-of-3 that finished 2-0).
+function gameIsUnneeded(game, match, games, scores) {
+  if (!isEliminationMatch(match)) return false;
+  const score = scores.find((s) => s.game_id === game.id) || {};
+  if (score.score1 != null && score.score2 != null) return false;
+  return matchIsComplete(match, games, scores);
+}
 
 function generateRoundRobinRounds(teamList) {
   const teams = [...teamList];
@@ -1125,6 +1150,10 @@ export default function App() {
   // same weeks as that table (this league or all leagues) instead of the
   // current league's Rankings. null = use Rankings / this week as before.
   const [dashboardScope, setDashboardScope] = useState(null);
+  // Per-stage format for knockout/playoff matches about to be created:
+  // 1 = single game, 3 = best of 3 (e.g. only the Grand Final best of 3).
+  // Stored per match as its game count, so no column is needed.
+  const [stageBestOf, setStageBestOf] = useState({});
   const [clubNameDraft, setClubNameDraft] = useState('');
   const [opponentNames, setOpponentNames] = useState('');
   const [interClubMode, setInterClubMode] = useState('auto');
@@ -1841,7 +1870,8 @@ export default function App() {
   // two inserts, regardless of pair count — used both for whole-schedule
   // generation (round robin, cross-club league) and for single/small-batch
   // bracket-stage matches. Game count (1 vs 3) is decided per pair, since
-  // inter-club-league teams from different clubs can have different sizes.
+  // inter-club-league teams from different clubs can have different sizes;
+  // `bestOf: 3` gives 2-player teams three games (a best-of-3) too.
   async function createMatchesForPairs(pairEntries) {
     const matchRows = pairEntries.map((entry) => ({
       week_id: weekId,
@@ -1865,7 +1895,8 @@ export default function App() {
       const t2Pairs = randomizedPairOrder(entry.teamBPlayers);
       if (!t1Pairs.length || !t2Pairs.length) throw new Error('Cannot create doubles games because a team has fewer than 2 players.');
 
-      const gamesPerMatch = entry.teamAPlayers.length === 2 && entry.teamBPlayers.length === 2 ? 1 : 3;
+      const singlePair = entry.teamAPlayers.length === 2 && entry.teamBPlayers.length === 2;
+      const gamesPerMatch = singlePair && entry.bestOf !== 3 ? 1 : 3;
 
       Array.from({ length: gamesPerMatch }, (_, n) => n).forEach((n) => {
         gameRows.push({
@@ -2622,6 +2653,7 @@ export default function App() {
         court: String.fromCharCode(65 + p.seedIndex),
         stage: 'knockout',
         bracketOrder: p.seedIndex + 1,
+        bestOf: stageBestOf.knockout,
         label: `Knockout ${p.seedIndex + 1}`,
       }));
       await createMatchesForPairs(pairEntries);
@@ -2701,6 +2733,7 @@ export default function App() {
         court: String.fromCharCode(64 + p.bracketOrder),
         stage: 'semifinal',
         bracketOrder: p.bracketOrder,
+        bestOf: stageBestOf.semifinal,
         label: p.label,
       }));
       await createMatchesForPairs(pairEntries);
@@ -2726,7 +2759,7 @@ export default function App() {
     await act(async () => {
       const byTeamId = Object.fromEntries(teams.map((t) => [t.id, playersForTeam(t.id)]));
       await createMatchForTeamPair(pair.team1, byTeamId[pair.team1.id], pair.team2, byTeamId[pair.team2.id], {
-        setNumber: 1, slot: 1, court: 'A', stage: 'grand_final', bracketOrder: 1, label: 'Grand Final',
+        setNumber: 1, slot: 1, court: 'A', stage: 'grand_final', bracketOrder: 1, label: 'Grand Final', bestOf: stageBestOf.grand_final,
       });
     });
 
@@ -2741,7 +2774,7 @@ export default function App() {
     await act(async () => {
       const byTeamId = Object.fromEntries(teams.map((t) => [t.id, playersForTeam(t.id)]));
       await createMatchForTeamPair(bronzePair.team1, byTeamId[bronzePair.team1.id], bronzePair.team2, byTeamId[bronzePair.team2.id], {
-        setNumber: 1, slot: 1, court: 'B', stage: 'bronze', bracketOrder: 1, label: 'Bronze Medal Match',
+        setNumber: 1, slot: 1, court: 'B', stage: 'bronze', bracketOrder: 1, label: 'Bronze Medal Match', bestOf: stageBestOf.bronze,
       });
     });
 
@@ -2766,12 +2799,12 @@ export default function App() {
         {
           teamA: playoffsQ1Pair.team1, teamAPlayers: byTeamId[playoffsQ1Pair.team1.id],
           teamB: playoffsQ1Pair.team2, teamBPlayers: byTeamId[playoffsQ1Pair.team2.id],
-          setNumber: 1, slot: 1, court: 'A', stage: 'playoffs', bracketOrder: 1, label: 'Qualifier 1',
+          setNumber: 1, slot: 1, court: 'A', stage: 'playoffs', bracketOrder: 1, label: 'Qualifier 1', bestOf: stageBestOf.qualifier1,
         },
         {
           teamA: playoffsEliminatorPair.team1, teamAPlayers: byTeamId[playoffsEliminatorPair.team1.id],
           teamB: playoffsEliminatorPair.team2, teamBPlayers: byTeamId[playoffsEliminatorPair.team2.id],
-          setNumber: 1, slot: 1, court: 'B', stage: 'playoffs', bracketOrder: 2, label: 'Eliminator',
+          setNumber: 1, slot: 1, court: 'B', stage: 'playoffs', bracketOrder: 2, label: 'Eliminator', bestOf: stageBestOf.eliminator,
         },
       ];
       await createMatchesForPairs(pairEntries);
@@ -2786,7 +2819,7 @@ export default function App() {
     await act(async () => {
       const byTeamId = Object.fromEntries(teams.map((t) => [t.id, playersForTeam(t.id)]));
       await createMatchForTeamPair(qualifier2Pair.team1, byTeamId[qualifier2Pair.team1.id], qualifier2Pair.team2, byTeamId[qualifier2Pair.team2.id], {
-        setNumber: 1, slot: 1, court: 'C', stage: 'playoffs', bracketOrder: 3, label: 'Qualifier 2',
+        setNumber: 1, slot: 1, court: 'C', stage: 'playoffs', bracketOrder: 3, label: 'Qualifier 2', bestOf: stageBestOf.qualifier2,
       });
     });
   }
@@ -2850,6 +2883,42 @@ export default function App() {
     });
   }
 
+  // Single Game / Best of 3 choice shown next to a stage's Confirm button.
+  function renderStageBestOfPicker(key, label) {
+    const value = stageBestOf[key] === 3 ? 3 : 1;
+    const pick = (v) => setStageBestOf((prev) => ({ ...prev, [key]: v }));
+    return (
+      <div className="row bestOfRow" key={`bestof-${key}`}>
+        <span className="muted">{label}:</span>
+        <button className={value === 1 ? 'btn' : 'btn secondary'} onClick={() => pick(1)}>Single Game</button>
+        <button className={value === 3 ? 'btn' : 'btn secondary'} onClick={() => pick(3)}>Best of 3</button>
+      </div>
+    );
+  }
+
+  async function setMatchBestOf(match, bestOf) {
+    const matchGames = games.filter((g) => g.match_id === match.id).sort((a, b) => a.game_number - b.game_number);
+    const scored = (g) => { const sc = scoreFor(g.id); return sc.score1 != null && sc.score2 != null; };
+    await act(async () => {
+      if (bestOf === 3) {
+        if (matchGames.length !== 1) throw new Error('Only single-game matches can be switched to best of 3.');
+        if (scored(matchGames[0])) throw new Error('Clear the score first — switching would undo an already-decided result.');
+        const g = matchGames[0];
+        const { error: err } = await supabase.from('match_games').insert([2, 3].map((n) => ({
+          match_id: match.id, game_number: n,
+          t1_player1_id: g.t1_player1_id, t1_player2_id: g.t1_player2_id,
+          t2_player1_id: g.t2_player1_id, t2_player2_id: g.t2_player2_id,
+        })));
+        if (err) throw err;
+      } else {
+        const extra = matchGames.filter((g) => g.game_number > 1);
+        if (extra.some(scored)) throw new Error('Clear the scores for games 2 and 3 first.');
+        const { error: err } = await supabase.from('match_games').delete().in('id', extra.map((g) => g.id));
+        if (err) throw err;
+      }
+    });
+  }
+
   async function resetMatchScores(matchId) {
     if (!(await askConfirm('Reset scores for this match?', { danger: false }))) return;
     const matchGames = games.filter((g) => g.match_id === matchId);
@@ -2897,9 +2966,12 @@ export default function App() {
       score2: db.score2 == null ? '' : String(db.score2),
     };
     const gameMatch = matchForGame(game);
+    const unneeded = gameIsUnneeded(game, gameMatch, games, scores);
+    const showGameNumber = !showMatchContext && isEliminationMatch(gameMatch)
+      && games.some((g) => g.match_id === game.match_id && g.id !== game.id);
 
     const editor = (
-      <div className="game">
+      <div className={`game${unneeded ? ' gameUnneeded' : ''}`}>
         <div className="gamePair gamePairLeft"><PlayerName name={playerName(game.t1_player1_id)} onSelect={openPlayerDashboard} /> / <PlayerName name={playerName(game.t1_player2_id)} onSelect={openPlayerDashboard} /></div>
         <input
           aria-label={`Score for ${playerName(game.t1_player1_id)} and ${playerName(game.t1_player2_id)}`}
@@ -2908,6 +2980,7 @@ export default function App() {
           inputMode="numeric"
           pattern="[0-9]*"
           value={shown.score1 ?? ''}
+          disabled={unneeded}
           onChange={(event) => draftChange(game.id, 'score1', event.target.value)}
         />
         <input
@@ -2917,18 +2990,29 @@ export default function App() {
           inputMode="numeric"
           pattern="[0-9]*"
           value={shown.score2 ?? ''}
+          disabled={unneeded}
           onChange={(event) => draftChange(game.id, 'score2', event.target.value)}
         />
         <div className="gamePair gamePairRight"><PlayerName name={playerName(game.t2_player1_id)} onSelect={openPlayerDashboard} /> / <PlayerName name={playerName(game.t2_player2_id)} onSelect={openPlayerDashboard} /></div>
         <div className="row gameActions">
-          <button className="btn green" onClick={() => saveGameScore(game.id)}>Save</button>
+          <button className="btn green" disabled={unneeded} onClick={() => saveGameScore(game.id)}>Save</button>
           <button className="btn secondary" onClick={() => resetGameScore(game.id)}>Clear</button>
         </div>
       </div>
     );
 
     if (!showMatchContext) {
-      return <div key={game.id}>{editor}</div>;
+      return (
+        <div key={game.id}>
+          {showGameNumber && (
+            <div className="gameNumber">
+              Game {game.game_number}
+              {unneeded && <span className="muted"> · Not needed — match already decided</span>}
+            </div>
+          )}
+          {editor}
+        </div>
+      );
     }
 
     return (
@@ -2971,10 +3055,38 @@ export default function App() {
           <TeamLabel teamId={match.team2_id} mood={matchMoods(match).team2} />
         </div>
 
+        {renderBestOfControl(match)}
+
         {games
           .filter((game) => game.match_id === match.id)
           .sort((a, b) => a.game_number - b.game_number)
           .map((game) => renderGameScoreEditor(game))}
+      </div>
+    );
+  }
+
+  // Shows the match format and lets an unplayed 2-player-team match switch
+  // between a single game and best of 3. Teams of 3-4 always play three
+  // rotating games, so there's nothing to switch for them.
+  function renderBestOfControl(match) {
+    const matchGames = games.filter((g) => g.match_id === match.id).sort((a, b) => a.game_number - b.game_number);
+    const isPairs = matchGames.length > 0 && matchGames.every((g) =>
+      g.t1_player1_id === matchGames[0].t1_player1_id && g.t1_player2_id === matchGames[0].t1_player2_id
+      && g.t2_player1_id === matchGames[0].t2_player1_id && g.t2_player2_id === matchGames[0].t2_player2_id);
+    const { aw, bw } = getMatchResult(match, games, scores);
+    const scored = (g) => { const sc = scoreFor(g.id); return sc.score1 != null && sc.score2 != null; };
+
+    return (
+      <div className="row bestOfRow">
+        <span className="muted">
+          {matchGames.length === 3 ? `Best of 3 · Games ${aw}-${bw}` : 'Single game'}
+        </span>
+        {isPairs && matchGames.length === 1 && !scored(matchGames[0]) && (
+          <button className="btn secondary" onClick={() => setMatchBestOf(match, 3)}>Make Best of 3</button>
+        )}
+        {isPairs && matchGames.length === 3 && !matchGames.slice(1).some(scored) && (
+          <button className="btn secondary" onClick={() => setMatchBestOf(match, 1)}>Make Single Game</button>
+        )}
       </div>
     );
   }
@@ -3731,6 +3843,7 @@ export default function App() {
   }, [games, matches, searchedPlayerMatches]);
 
   const completed = scores.filter((s) => s.score1 != null && s.score2 != null).length;
+  const neededGameCount = games.filter((g) => !gameIsUnneeded(g, matches.find((m) => m.id === g.match_id), games, scores)).length;
 
   const nav = [
     ['dashboard', 'Dashboard', Home],
@@ -3836,7 +3949,7 @@ export default function App() {
               <div className="card stat"><Users className="statIcon" /><div><span className="muted">Players</span><b>{players.length}</b></div></div>
               <div className="card stat"><Shield className="statIcon" /><div><span className="muted">Teams</span><b>{teams.length}</b></div></div>
               <div className="card stat"><Swords className="statIcon" /><div><span className="muted">Matches</span><b>{matches.length}</b></div></div>
-              <div className="card stat"><Trophy className="statIcon" /><div><span className="muted">Games Completed</span><b>{completed}/{games.length}</b></div></div>
+              <div className="card stat"><Trophy className="statIcon" /><div><span className="muted">Games Completed</span><b>{completed}/{neededGameCount}</b></div></div>
               <div className="card stat"><Flame className="statIcon" /><div><span className="muted">Leader</span><b>{playerStandings[0]?.player || '-'}</b></div></div>
             </div>
           </>
@@ -4309,6 +4422,7 @@ export default function App() {
               <div className="card" id="tournamentProgress">
                 <h3>Tournament Progress</h3>
 
+
                 {!leagueComplete && (
                   <p className="muted">Finish entering every league score to continue to knockouts.</p>
                 )}
@@ -4380,6 +4494,7 @@ export default function App() {
                       </div>
                     ))}
 
+                    {renderStageBestOfPicker('knockout', 'Knockout matches')}
                     <button className="btn green" onClick={confirmKnockoutMatches} disabled={!knockoutSeedPairs.length}>
                       Confirm Knockout Matches
                     </button>
@@ -4461,6 +4576,7 @@ export default function App() {
                             </select>
                           </div>
                         ))}
+                        {renderStageBestOfPicker('semifinal', 'Semifinals')}
                         <button className="btn green" onClick={confirmSemifinalMatches} disabled={semifinalSeedPairs.length < 2}>
                           Confirm Semifinal Matches
                         </button>
@@ -4494,6 +4610,7 @@ export default function App() {
                                     {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                   </select>
                                 </div>
+                                {renderStageBestOfPicker('grand_final', 'Grand Final')}
                                 <button className="btn green" onClick={confirmGrandFinalMatch}>Confirm Grand Final</button>
                               </div>
                             )}
@@ -4519,6 +4636,7 @@ export default function App() {
                                     {semifinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                   </select>
                                 </div>
+                                {renderStageBestOfPicker('bronze', 'Bronze Medal Match')}
                                 <button className="btn green" onClick={confirmBronzeMatch}>Confirm Bronze Medal Match</button>
                               </div>
                             )}
@@ -4579,6 +4697,8 @@ export default function App() {
                             {bracketOverridePool.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                           </select>
                         </div>
+                        {renderStageBestOfPicker('qualifier1', 'Qualifier 1')}
+                        {renderStageBestOfPicker('eliminator', 'Eliminator')}
                         <button
                           className="btn green"
                           onClick={confirmQualifier1AndEliminator}
@@ -4613,6 +4733,7 @@ export default function App() {
                                   {playoffsQ1EliminatorEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                 </select>
                               </div>
+                              {renderStageBestOfPicker('qualifier2', 'Qualifier 2')}
                               <button className="btn green" onClick={confirmQualifier2Match} disabled={!qualifier2Pair}>
                                 Confirm Qualifier 2
                               </button>
@@ -4644,6 +4765,7 @@ export default function App() {
                                           {playoffsGrandFinalEntrantTeams.map((t) => <option key={t.id} value={t.id}>{t.name} — {teamMembersText(t.id)}</option>)}
                                         </select>
                                       </div>
+                                      {renderStageBestOfPicker('grand_final', 'Grand Final')}
                                       <button className="btn green" onClick={confirmGrandFinalMatch} disabled={!playoffsGrandFinalPair}>
                                         Confirm Grand Final
                                       </button>

@@ -924,3 +924,8 @@ body {
   }
   .btn:active:not(:disabled) { transform: none; }
 }
+
+/* Best-of-3 elimination matches */
+.bestOfRow { align-items: center; gap: 10px; margin: 4px 0 10px; }
+.gameNumber { font-weight: 800; font-size: 13px; margin: 10px 0 4px; letter-spacing: .02em; }
+.gameUnneeded { opacity: .4; }
